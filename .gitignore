@@ -1,0 +1,78 @@
+# ===========================================================================
+#  RAG-lab .gitignore
+# ===========================================================================
+
+# ---------- 敏感配置（绝不提交）----------
+.env
+.env.local
+.env.*.local
+*.env
+!.env.example
+
+# ---------- 运行时数据 ----------
+# 整个 data/ 排除，避免 Git 遍历 2GB 模型缓存导致卡死
+# 只放行两个占位文件，保证目录结构能被创建
+data/*
+!data/uploads/
+!data/logs/
+data/uploads/*
+data/logs/*
+!data/uploads/.gitkeep
+!data/logs/.gitkeep
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+
+# ---------- 测试与检查工具缓存 ----------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.dmypy.json
+.ruff_cache/
+.tox/
+.nox/
+
+# ---------- 日志 ----------
+*.log
+logs/
+
+# ---------- 模型与数据文件 ----------
+*.bin
+*.safetensors
+*.gguf
+*.pt
+*.pth
+*.onnx
+*.h5
+*.ckpt
+
+# ---------- IDE ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# ---------- 操作系统 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- Docker ----------
+*.pid

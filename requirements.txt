@@ -1,0 +1,47 @@
+# ---------------------------------------------------------------------------
+# RAG-lab 生产依赖
+# ---------------------------------------------------------------------------
+# Web 框架
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+pydantic==2.10.4
+pydantic-settings==2.7.0
+
+# 数据库
+sqlalchemy==2.0.36
+asyncpg==0.30.0
+psycopg2-binary==2.9.10
+alembic==1.14.0
+
+# Redis
+redis==5.2.1
+hiredis==3.1.0
+
+# 认证
+# 注意: passlib 1.7.4 读取 bcrypt.__about__.__version__，
+# 该属性在 bcrypt 4.1+ 中被移除，会导致告警。锁 4.0.1 消除。
+passlib==1.7.4
+bcrypt==4.0.1
+pyjwt==2.10.1
+
+# HTTP
+httpx==0.28.1
+
+# 向量库
+qdrant-client==1.12.1
+
+# Embedding（本地 BGE-M3）
+sentence-transformers==3.3.1
+torch==2.5.1
+transformers==4.47.1
+numpy==1.26.4
+
+# 文档解析
+pymupdf==1.25.1
+pdfplumber==0.11.4
+python-docx==1.1.2
+
+# 工具
+python-dotenv==1.0.1
+tenacity==9.0.0

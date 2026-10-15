@@ -1,0 +1,27 @@
+# ---------------------------------------------------------------------------
+#  开发模式覆盖配置
+#
+#  用途：把主机上的 app/ 目录挂载进容器，改代码后 uvicorn --reload 自动生效，
+#        无需重新构建镜像。适合开发调试。
+#
+#  用法：
+#    docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+#  停止：
+#    docker compose -f docker-compose.yml -f docker-compose.dev.yml down
+# ---------------------------------------------------------------------------
+services:
+  backend:
+    volumes:
+      - ./data/uploads:/app/data/uploads
+      - ./data/logs:/app/data/logs
+      - ./data/hf_cache:/app/data/hf_cache
+      - ./app:/app/app:ro
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --reload-dir /app/app
+    environment:
+      APP_ENV: development

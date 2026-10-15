@@ -1,0 +1,117 @@
+# ---------------------------------------------------------------------------
+#  RAG-lab 一键编排
+#  后端 + PostgreSQL + Qdrant + Redis
+#  启动： docker compose up -d --build
+#  查看： docker compose ps
+#  日志： docker compose logs -f backend
+# ---------------------------------------------------------------------------
+name: raglab
+
+services:
+  # ---------------------------------------------------------------- 后端
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: raglab-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data/uploads:/app/data/uploads
+      - ./data/logs:/app/data/logs
+      - ./data/hf_cache:/app/data/hf_cache      # BGE 模型缓存，避免重启重下
+      # 说明：
+      #   代码默认使用镜像内版本。本地开发热更新请用:
+      #     docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+      #   HF_ENDPOINT / HF_HOME 由 .env 提供，此处不重复定义
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - raglab-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"      # 访问宿主机上的 vLLM
+
+  # ------------------------------------------------------------ PostgreSQL
+  postgres:
+    image: postgres:16-alpine
+    container_name: raglab-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-raglab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-raglab_pass_change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-raglab}
+      TZ: Asia/Shanghai
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-raglab} -d ${POSTGRES_DB:-raglab}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - raglab-net
+
+  # ---------------------------------------------------------------- Qdrant
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: raglab-qdrant
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: "6334"
+      QDRANT__LOG_LEVEL: INFO
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - raglab-net
+
+  # ----------------------------------------------------------------- Redis
+  redis:
+    image: redis:7-alpine
+    container_name: raglab-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - raglab-net
+
+volumes:
+  pgdata:
+    name: raglab-pgdata
+  qdrant_data:
+    name: raglab-qdrant-data
+  redis_data:
+    name: raglab-redis-data
+
+networks:
+  raglab-net:
+    name: raglab-net
+    driver: bridge
