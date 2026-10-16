@@ -83,7 +83,7 @@ class Client:
         return self._req("DELETE", f"/api/kb/{kb_id}")
 
     def upload(self, kb_id: str, filename: str, content: bytes) -> dict:
-        boundary = f"----raglab{uuid.uuid4().hex}"
+        boundary = f"----rag-lab{uuid.uuid4().hex}"
         body = b""
         body += f"--{boundary}\r\n".encode()
         body += f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode()
@@ -129,13 +129,13 @@ def wait_indexed(c: Client, kb_id: str, expect: int, timeout: int = 600) -> dict
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="RAG-lab 端到端测试")
+    ap = argparse.ArgumentParser(description="RAG-LAB 端到端测试")
     ap.add_argument("--host", default="http://localhost:8000")
     ap.add_argument("-u", "--user", default="admin")
     ap.add_argument("-p", "--password", default="admin123456")
     ap.add_argument("--keep", action="store_true", help="保留测试数据")
-    ap.add_argument("--docs", default=str(Path(__file__).resolve().parent.parent / "tests" / "fixtures"),
-                    help="测试文档目录（默认 tests/fixtures）")
+    ap.add_argument("--docs", default=str(Path(__file__).resolve().parent.parent / "test_fixtures"),
+                    help="测试文档目录（默认 test_fixtures）")
     args = ap.parse_args()
 
     c = Client(args.host)
@@ -143,7 +143,7 @@ def main() -> int:
     kb_name = f"e2e测试_{int(time.time())}"
 
     print(f"\n{BOLD if False else ''}{CYAN}{'=' * 66}{NC}")
-    print(f"{CYAN}  RAG-lab 端到端集成测试{NC}")
+    print(f"{CYAN}  RAG-LAB 端到端集成测试{NC}")
     print(f"{CYAN}{'=' * 66}{NC}\n")
 
     # ---- 1 健康检查 ----

@@ -22,19 +22,24 @@ async def write_audit(
     ip: Optional[str] = None,
     commit: bool = True,
 ) -> None:
+    """写审计日志。
+
+    审计失败绝不能影响业务：内部用 SAVEPOINT 隔离，
+    失败时只回滚审计这一条，不动调用方事务里已做的改动。
+    """
     try:
-        db.add(
-            AuditLog(
-                user_id=user_id,
-                username=username,
-                action=action,
-                resource=resource,
-                detail=detail or {},
-                ip_address=ip,
+        async with db.begin_nested():  # SAVEPOINT：只隔离本次写入
+            db.add(
+                AuditLog(
+                    user_id=user_id,
+                    username=username,
+                    action=action,
+                    resource=resource,
+                    detail=detail or {},
+                    ip_address=ip,
+                )
             )
-        )
         if commit:
             await db.commit()
     except Exception as e:  # noqa: BLE001
-        logger.warning("写审计日志失败: %s", e)
-        await db.rollback()
+        logger.warning("写审计日志失败（不影响业务）: %s", e)

@@ -42,7 +42,12 @@ async def get_db() -> AsyncIterator[AsyncSession]:
 
 
 async def init_db() -> None:
-    """建表（生产环境应改用 Alembic 迁移）"""
+    """建表。
+
+    采用 create_all 直接建表（幂等，已存在则跳过）。
+    requirements 里带了 alembic 但本项目暂未产出版本化迁移脚本，
+    如需演进表结构，请先生成 baseline 迁移再改用 upgrade。
+    """
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     logger.info("数据库表已就绪")

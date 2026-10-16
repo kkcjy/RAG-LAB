@@ -1,4 +1,4 @@
-# RAG-lab
+# RAG-LAB
 
 企业级 RAG 知识库问答系统。支持通用文档入库、本地知识库检索、联网搜索兜底、
 多用户账户与权限管理，全流程 Docker 容器化部署。
@@ -24,8 +24,10 @@
 
 **知识库**
 - 支持 PDF / Word(.docx/.doc) / Markdown / TXT 文档
+- 扫描件 PDF 自动 OCR（本地 RapidOCR，无需联网、无需额外服务）
 - 中文友好的递归分块，避免切断句子
 - 增量索引：上传即索引，支持重新索引、删除
+- 索引进度可见（进行中/已就绪/失败），并自动补偿中断的索引任务
 - 一个知识库对应一个向量集合，天然隔离
 
 **问答（路线 C 混合式）**
@@ -89,7 +91,7 @@
 **1. 准备配置**
 
 ```bash
-cd /home/p50/RAG-lab
+cd /home/p50/RAG-LAB
 cp .env.example .env
 ```
 
@@ -204,6 +206,22 @@ WEB_SEARCH_AUTO_FALLBACK=true    # 未命中时是否自动联网
 CHUNK_SIZE=800        # 每块字符数
 CHUNK_OVERLAP=150     # 相邻块重叠字符数
 ```
+
+### OCR（扫描件 PDF）
+
+当 PDF 提取不到任何文字（图片构成的扫描件）时，自动转 OCR 识别：
+
+```bash
+OCR_ENABLED=true      # 关闭则扫描件直接判为解析失败
+OCR_MAX_PAGES=30      # 单文档最多 OCR 页数，防止超长文档拖垮 CPU
+OCR_DPI=200           # 页面渲染分辨率，越高越准但越慢
+```
+
+引擎为 RapidOCR（PP-OCRv4 中文模型，纯 ONNX 推理，模型随包内置，约 15MB）。
+CPU 推理约 1 秒/页，无需 GPU、无需联网、无需外部服务。
+
+**注意**：OCR 在索引阶段异步执行，页数多时索引耗时会明显增加。
+超过 `OCR_MAX_PAGES` 的页数会被忽略，日志中会有提示。
 
 经验值：中文技术文档 500-800，叙述性文档 800-1200。
 重叠一般设为块大小的 15%-20%，避免信息在切分处丢失。
@@ -474,7 +492,7 @@ EMBEDDING_API_MODEL=BAAI/bge-m3
 ## 项目结构
 
 ```
-RAG-lab/
+RAG-LAB/
 ├── app/
 │   ├── main.py                    FastAPI 入口，路由注册，生命周期
 │   ├── core/
@@ -495,8 +513,8 @@ RAG-lab/
 │   │   └── websearch/
 │   │       └── base.py            BaseWebSearch + Tavily 实现 + 工厂
 │   ├── services/
-│   │   ├── document_parser.py     PDF/Word/MD/TXT 解析 + 中文分块
-│   │   ├── indexing.py            索引流程：解析→分块→向量化→入库
+│   │   ├── document_parser.py     PDF/Word/MD/TXT 解析 + 扫描件 OCR + 中文分块
+│   │   ├── indexing.py            索引流程：解析→分块→向量化→入库 + 中断补偿
 │   │   ├── rag_engine.py          ★ RAG 核心：改写→检索→判定→联网→生成
 │   │   ├── runtime_config.py      运行时配置（后台改配置立即生效）
 │   │   └── bootstrap.py           初始化管理员与默认配置
@@ -506,11 +524,11 @@ RAG-lab/
 │   │   ├── admin.py               管理端路由
 │   │   ├── kb.py                  知识库路由
 │   │   ├── chat.py                问答路由
-│   │   └── system.py              健康检查
+│   │   └── system.py              健康检查、配置概览
 │   ├── schemas/
 │   │   └── api.py                 Pydantic 请求/响应模型
 │   └── utils/
-│       └── audit.py               审计日志
+│       └── audit.py               审计日志（SAVEPOINT 隔离，失败不影响业务）
 ├── scripts/
 │   ├── start.sh                   一键启动
 │   ├── ragcli.py                  终端客户端（纯标准库）
@@ -519,9 +537,10 @@ RAG-lab/
 │   ├── test_query_rewrite.py      Query 改写与相关度判定验证
 │   ├── selfcheck.py               静态自查
 │   └── verify_core.py             核心逻辑验证（46 项断言）
+├── test_fixtures/                 测试用示例文档（PDF/Word/MD/TXT，供 e2e 使用）
 ├── data/
 │   ├── uploads/                   上传文档（挂载卷）
-│   ├── logs/                      日志
+│   ├── logs/                      日志（app.log，10MB 轮转）
 │   └── hf_cache/                  BGE 模型缓存
 ├── Dockerfile
 ├── docker-compose.yml
@@ -550,7 +569,7 @@ docker compose logs -f backend
 或改为官方源。验证镜像可达：
 
 ```bash
-docker exec raglab-backend curl -s -o /dev/null -w "%{http_code}\n" https://hf-mirror.com
+docker exec rag-lab-backend curl -s -o /dev/null -w "%{http_code}\n" https://hf-mirror.com
 # 期望输出 200
 ```
 
@@ -567,6 +586,15 @@ status: degraded          ← 向量库OK，LLM未配置
 llm_model: "未就绪: ..."   ← 具体原因会写在里面
 embedding_dim: 1024        ← 模型已加载
 vector_store_ok: true
+web_search_enabled: false  ← 联网搜索是否真正可用
+warnings: [...]            ← 配置层面的告警（见下）
+```
+
+`warnings` 会明确列出"看着能用其实没配"的项，例如：
+
+```
+warnings: ["联网搜索已启用兜底(WEB_SEARCH_AUTO_FALLBACK=true)但 provider 不可用
+           （tavily，未配置 TAVILY_API_KEY），知识库未命中时无法联网补充"]
 ```
 
 **重要**：LLM 未配置时，检索链路仍然完全可用。你可以用纯检索接口验证知识库：
@@ -618,7 +646,8 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 `error_message` 字段会说明原因。常见情况：
 
-- PDF 是扫描件（图片，无文字层）→ 需要 OCR，当前版本不支持
+- 扫描件 PDF 且 OCR 也识别不出文字 → 检查文件清晰度，或转为文字版；确认 `OCR_ENABLED=true`
+- 扫描件页数超过 `OCR_MAX_PAGES` → 提高该值后重新索引
 - `.doc` 格式缺少 antiword → 转为 `.docx` 上传
 - 文件损坏或加密
 
@@ -644,10 +673,15 @@ RETRIEVAL_LLM_JUDGE=false
 
 ```bash
 python3 scripts/ragcli.py --health
-# 看 "联网搜索" 一行是否显示 TavilyWebSearch
+# 联网搜索一行会明确标注是否可用：✓ / ✗ 不可用
 ```
 
-若显示 `NullWebSearch`，说明 key 未配置。
+若显示 `NullWebSearch ✗ 不可用`，说明 key 未配置。健康检查的 `warnings`
+字段会给出具体原因（例如"已启用兜底但 provider 不可用"），
+启动日志中也有对应 WARNING。
+
+**注意**：`WEB_SEARCH_AUTO_FALLBACK=true` 但未配 key 时，知识库未命中会
+直接返回"无法回答"，不会联网补充。要么配 key，要么把该开关关掉。
 
 ### 内存占用过高
 
@@ -684,7 +718,7 @@ BGE_NUM_THREADS=2
 - [ ] 修改 `POSTGRES_PASSWORD`
 - [ ] 数据库端口 5432、Qdrant 端口 6333 **不要**暴露到公网
 - [ ] 配置 HTTPS（Nginx + Let's Encrypt）
-- [ ] 定期备份 `raglab-pgdata` 与 `raglab-qdrant-data` 数据卷
+- [ ] 定期备份 `rag-lab-pgdata` 与 `rag-lab-qdrant-data` 数据卷
 - [ ] 检查 `docker compose logs` 无异常
 
 ---

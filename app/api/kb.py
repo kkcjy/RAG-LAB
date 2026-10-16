@@ -38,7 +38,7 @@ from app.schemas.api import (
     KBOut,
     KBUpdate,
 )
-from app.services.indexing import delete_document, index_document
+from app.services.indexing import delete_document, index_document, remove_kb_dir
 from app.utils.audit import write_audit
 
 logger = logging.getLogger(__name__)
@@ -164,21 +164,23 @@ async def delete_kb(
 ):
     name = kb.name
     collection = kb.collection_name
+    kb_id = kb.id
 
-    # 删磁盘文件
+    # 删磁盘文件 + 上传目录
     docs = (
-        await db.execute(select(Document).where(Document.kb_id == kb.id))
+        await db.execute(select(Document).where(Document.kb_id == kb_id))
     ).scalars().all()
     for d in docs:
         try:
             Path(d.stored_path).unlink(missing_ok=True)
         except Exception as e:  # noqa: BLE001
             logger.warning("删除文件失败 %s: %s", d.stored_path, e)
+    remove_kb_dir(kb_id)
 
     await db.delete(kb)
     await db.commit()
 
-    # 删向量集合
+    # 删向量集合（放在事务提交之后：库记录已删，集合删除失败也不会留下不一致）
     try:
         await get_vector_store().drop_collection(collection)
     except Exception as e:  # noqa: BLE001
@@ -248,21 +250,24 @@ async def list_permissions(
     admin: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
+    # 一次 join 取全，避免循环里逐个查用户（N+1）
     rows = (
-        await db.execute(select(KBPermission).where(KBPermission.kb_id == kb_id))
-    ).scalars().all()
-
-    items = []
-    for p in rows:
-        u = await db.get(User, p.user_id)
-        items.append(
-            {
-                "user_id": str(p.user_id),
-                "username": u.username if u else None,
-                "can_read": p.can_read,
-                "can_write": p.can_write,
-            }
+        await db.execute(
+            select(KBPermission, User.username)
+            .join(User, User.id == KBPermission.user_id, isouter=True)
+            .where(KBPermission.kb_id == kb_id)
         )
+    ).all()
+
+    items = [
+        {
+            "user_id": str(p.user_id),
+            "username": username,
+            "can_read": p.can_read,
+            "can_write": p.can_write,
+        }
+        for p, username in rows
+    ]
     return {"items": items}
 
 
@@ -322,7 +327,28 @@ async def list_documents(
         )
     ).scalars().all()
 
-    return DocListOut(total=total, items=[DocOut.model_validate(d) for d in rows])
+    # 索引进度汇总（针对整个知识库，不受分页影响）
+    status_rows = (
+        await db.execute(
+            select(Document.status, func.count())
+            .where(Document.kb_id == kb.id)
+            .group_by(Document.status)
+        )
+    ).all()
+    counts = {s: c for s, c in status_rows}
+    ready_n = counts.get("ready", 0)
+    failed_n = counts.get("failed", 0)
+    # 除 ready/failed 外的状态都算"处理中"
+    indexing_n = sum(c for s, c in counts.items() if s not in ("ready", "failed"))
+
+    return DocListOut(
+        total=total,
+        items=[DocOut.model_validate(d) for d in rows],
+        indexing=indexing_n,
+        ready=ready_n,
+        failed=failed_n,
+        all_done=indexing_n == 0,
+    )
 
 
 async def _index_in_background(doc_id: uuid.UUID) -> None:

@@ -1,6 +1,7 @@
 # FastAPI 应用入口
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -15,11 +16,39 @@ from app.core.database import AsyncSessionLocal, close_db, init_db
 # ---------------------------------------------------------------------------
 # 日志
 # ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.DEBUG if settings.app_env == "development" else logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+_LOG_LEVEL = logging.DEBUG if settings.app_env == "development" else logging.INFO
+
+logging.basicConfig(level=_LOG_LEVEL, format=_LOG_FORMAT)
 logger = logging.getLogger(__name__)
+
+
+def _setup_file_logging() -> None:
+    """把日志同时写入 data/logs/app.log（按大小轮转）。
+
+    容器里 stdout 日志随容器销毁而丢失，落盘后便于事后排查。
+    """
+    try:
+        log_dir = Path(settings.upload_dir).parent / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(
+            log_dir / "app.log",
+            maxBytes=10 * 1024 * 1024,  # 单文件 10MB
+            backupCount=5,              # 保留 5 个历史文件
+            encoding="utf-8",
+        )
+        handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+        handler.setLevel(_LOG_LEVEL)
+        logging.getLogger().addHandler(handler)
+        logger.info("文件日志已启用: %s", log_dir / "app.log")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("文件日志初始化失败（仅输出到 stdout）: %s", e)
+
+
+_setup_file_logging()
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +60,21 @@ async def lifespan(app: FastAPI):
     logger.info("启动 %s (env=%s)", settings.app_name, settings.app_env)
     logger.info("LLM provider: %s", settings.llm_provider)
     logger.info("Embedding provider: %s", settings.embedding_provider)
+
+    # 0) 联网搜索配置校验：没配 key 却开了兜底，必须显式告警
+    try:
+        from app.providers.websearch.base import get_web_search
+
+        ws = get_web_search()
+        if ws.enabled:
+            logger.info("联网搜索: %s", ws.display_name)
+        elif settings.web_search_auto_fallback:
+            logger.warning(
+                "联网搜索不可用但 WEB_SEARCH_AUTO_FALLBACK=true —— "
+                "知识库未命中时将无法联网补充。请配置 TAVILY_API_KEY 或关闭兜底。"
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("联网搜索检查失败: %s", e)
 
     # 1) 建表
     await init_db()
@@ -54,11 +98,38 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("Qdrant 检查失败: %s", e)
 
+    # 4) 后台预热 embedding 模型（BGE 首次加载约需数秒~数十秒）
+    async def _warmup_embedding():
+        try:
+            from app.providers.embedding.base import get_embedding
+
+            ok = await get_embedding().warmup()
+            logger.info("Embedding 模型预热: %s", "完成" if ok else "失败/跳过")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Embedding 预热异常: %s", e)
+
+    # 5) 补偿上次进程退出时被中断的索引任务
+    async def _resume_indexing():
+        # 等 embedding 预热完再补偿，避免两处同时加载模型
+        await warmup_task
+        try:
+            from app.services.indexing import resume_stuck_documents
+
+            async with AsyncSessionLocal() as db:
+                await resume_stuck_documents(db)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("索引补偿异常: %s", e)
+
+    warmup_task = asyncio.create_task(_warmup_embedding())
+    resume_task = asyncio.create_task(_resume_indexing())
+
     logger.info("服务已就绪 → http://%s:%d/docs", settings.app_host, settings.app_port)
     logger.info("=" * 60)
 
     yield
 
+    warmup_task.cancel()
+    resume_task.cancel()
     await close_db()
     logger.info("服务已关闭")
 

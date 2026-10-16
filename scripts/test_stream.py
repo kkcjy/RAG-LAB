@@ -16,12 +16,14 @@ import urllib.error
 HOST = "http://localhost:8000"
 
 
-def api(method, path, body=None):
+def api(method, path, body=None, token=None) -> dict:
     url = f"{HOST}{path}"
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(url, data=data, method=method)
     if data:
         req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
     with urllib.request.urlopen(req, timeout=120) as r:
         return json.loads(r.read().decode())
 
@@ -32,7 +34,22 @@ login = api("POST", "/api/auth/login",
 token = login["access_token"]
 print(f"登录成功，token 长度 {len(token)}")
 
-kb_id = open("/tmp/kb_id.txt").read().strip()
+
+def _pick_kb() -> str:
+    """定位一个含已就绪文档的知识库：/tmp/kb_id.txt 优先，否则取第一个可用的。"""
+    try:
+        with open("/tmp/kb_id.txt") as f:
+            return f.read().strip()
+    except OSError:
+        pass
+    for k in api("GET", "/api/kb", token=token).get("items", []):
+        if k.get("chunk_count", 0) > 0:
+            return k["id"]
+    print("没有可用的知识库。请先运行 scripts/e2e_test.py --keep 准备测试数据。")
+    sys.exit(1)
+
+
+kb_id = _pick_kb()
 print(f"知识库: {kb_id}")
 
 # 发起 SSE 请求

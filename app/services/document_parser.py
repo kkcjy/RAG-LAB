@@ -1,4 +1,6 @@
 # 文档解析：PDF / Word / Markdown / TXT → 纯文本
+#   PDF：PyMuPDF 优先，回退 pdfplumber；两者都无文字时自动转 OCR（扫描件）
+#   OCR：本地 RapidOCR（PP-OCRv4），模型内置，CPU 推理，无需联网
 from __future__ import annotations
 
 import logging
@@ -23,8 +25,73 @@ class UnsupportedFileType(Exception):
 # ---------------------------------------------------------------------------
 # 各类型解析器
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# OCR（扫描件 PDF / 图片型文档）
+# ---------------------------------------------------------------------------
+_ocr_engine = None
+
+
+def _get_ocr_engine():
+    """懒加载 OCR 引擎（首次调用时初始化，约 1 秒）。
+
+    rapidocr_onnxruntime 模型内置于包中，无需联网下载。
+    """
+    global _ocr_engine
+    if _ocr_engine is None:
+        from rapidocr_onnxruntime import RapidOCR
+
+        logger.info("正在初始化 OCR 引擎（RapidOCR / PP-OCRv4）")
+        _ocr_engine = RapidOCR()
+    return _ocr_engine
+
+
+def _ocr_image_bytes(img_bytes: bytes) -> str:
+    """对单张图片做 OCR，返回识别文本（按行拼接）"""
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    engine = _get_ocr_engine()
+    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    result, _ = engine(np.array(img))
+    if not result:
+        return ""
+    # result 形如 [[box, text, score], ...]
+    return "\n".join(str(line[1]) for line in result if len(line) > 1)
+
+
+def _ocr_pdf(path: Path) -> tuple[str, int, bool]:
+    """对扫描件 PDF 做 OCR。
+
+    返回 (文本, 已处理页数, 是否因超出上限被截断)。
+    用 PyMuPDF 渲染页面为位图（无需额外系统依赖，比 pdftoppm 少一次进程调用）。
+    """
+    import fitz  # PyMuPDF
+
+    from app.core.config import settings
+
+    max_pages = settings.ocr_max_pages
+    dpi = settings.ocr_dpi
+    parts: list[str] = []
+
+    with fitz.open(str(path)) as doc:
+        total = doc.page_count
+        limit = min(total, max_pages)
+        for i in range(limit):
+            page = doc[i]
+            # 渲染为 PNG 位图
+            pix = page.get_pixmap(dpi=dpi)
+            text = _ocr_image_bytes(pix.tobytes("png"))
+            if text.strip():
+                parts.append(text)
+            logger.debug("OCR 第 %d/%d 页完成，识别 %d 字符", i + 1, limit, len(text))
+
+    return "\n\n".join(parts), limit, total > max_pages
+
+
 def _parse_pdf(path: Path) -> ParsedDocument:
-    """优先 PyMuPDF（快、稳），失败回退 pdfplumber"""
+    """优先 PyMuPDF（快、稳），失败回退 pdfplumber；无文字则尝试 OCR。"""
     text_parts: list[str] = []
     page_count = 0
 
@@ -43,15 +110,45 @@ def _parse_pdf(path: Path) -> ParsedDocument:
         logger.warning("PyMuPDF 解析失败(%s)，回退 pdfplumber", e)
 
     # 回退
-    import pdfplumber
+    try:
+        import pdfplumber
 
-    parts = []
-    with pdfplumber.open(str(path)) as pdf:
-        page_count = len(pdf.pages)
-        for page in pdf.pages:
-            parts.append(page.extract_text() or "")
-    text = "\n".join(parts)
-    return ParsedDocument(text=text, page_count=page_count, meta={"parser": "pdfplumber"})
+        parts = []
+        with pdfplumber.open(str(path)) as pdf:
+            page_count = len(pdf.pages)
+            for page in pdf.pages:
+                parts.append(page.extract_text() or "")
+        text = "\n".join(parts)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("pdfplumber 解析失败(%s)", e)
+        text = ""
+
+    if text.strip():
+        return ParsedDocument(text=text, page_count=page_count, meta={"parser": "pdfplumber"})
+
+    # 两个解析器都读不到文字 —— 很可能是扫描件，尝试 OCR
+    from app.core.config import settings
+
+    if not settings.ocr_enabled:
+        logger.warning("PDF 无文本且 OCR 已禁用: %s", path.name)
+        return ParsedDocument(text="", page_count=page_count, meta={"parser": "none"})
+
+    try:
+        logger.info("PDF 无文本，尝试 OCR: %s", path.name)
+        ocr_text, done_pages, truncated = _ocr_pdf(path)
+        meta = {
+            "parser": "rapidocr",
+            "ocr_pages": done_pages,
+            "ocr_truncated": truncated,
+        }
+        if truncated:
+            logger.warning(
+                "文档页数超过 OCR 上限，仅处理前 %d 页: %s", done_pages, path.name
+            )
+        return ParsedDocument(text=ocr_text, page_count=page_count or done_pages, meta=meta)
+    except Exception as e:  # noqa: BLE001
+        logger.error("OCR 失败(%s): %s", path.name, e)
+        return ParsedDocument(text="", page_count=page_count, meta={"parser": "ocr_failed"})
 
 
 def _parse_docx(path: Path) -> ParsedDocument:

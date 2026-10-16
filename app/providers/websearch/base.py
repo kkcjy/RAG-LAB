@@ -30,6 +30,11 @@ class BaseWebSearch(abc.ABC):
     def display_name(self) -> str:
         return self.__class__.__name__
 
+    @property
+    def enabled(self) -> bool:
+        """是否真正可用（NullWebSearch 返回 False）"""
+        return True
+
 
 class TavilyWebSearch(BaseWebSearch):
     """Tavily —— 专为 LLM/RAG 设计的搜索 API，返回内容已做清洗，可直接喂模型"""
@@ -79,6 +84,10 @@ class NullWebSearch(BaseWebSearch):
     async def search(self, query: str, max_results: int = 5) -> List[SearchResult]:
         logger.warning("联网搜索未配置，跳过: %s", query)
         return []
+
+    @property
+    def enabled(self) -> bool:
+        return False
 
 
 # ---------------------------------------------------------------------------

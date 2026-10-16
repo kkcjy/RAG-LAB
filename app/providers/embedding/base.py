@@ -39,6 +39,10 @@ class BaseEmbedding(abc.ABC):
     def display_name(self) -> str:
         return self.__class__.__name__
 
+    async def warmup(self) -> bool:
+        """预热钩子。默认空实现（远程 API 无需预热）。"""
+        return True
+
 
 class LocalBGEEmbedding(BaseEmbedding):
     """
@@ -117,6 +121,20 @@ class LocalBGEEmbedding(BaseEmbedding):
     async def embed_query(self, text: str) -> List[float]:
         vecs = await self.embed_documents([text])
         return vecs[0]
+
+    async def warmup(self) -> bool:
+        """预热：提前加载模型，避免首次上传/提问时卡顿。
+
+        在线程池中执行，不阻塞事件循环；失败不影响服务可用性。
+        """
+        import asyncio
+
+        try:
+            await asyncio.to_thread(self._load)
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning("BGE 模型预热失败（将在首次使用时重试）: %s", e)
+            return False
 
 
 class OpenAICompatEmbedding(BaseEmbedding):

@@ -1,4 +1,4 @@
-# RAG-lab 配置加载层
+# RAG-LAB 配置加载层
 # 统一从 .env 读取所有配置，代码中通过 settings.XXX 访问
 from functools import lru_cache
 from typing import List, Optional
@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     )
 
     # ---------- 应用 ----------
-    app_name: str = "RAG-lab"
+    app_name: str = "RAG-LAB"
     app_env: str = "development"
     app_host: str = "0.0.0.0"
     app_port: int = 8000
@@ -92,6 +92,11 @@ class Settings(BaseSettings):
     chunk_size: int = 800
     chunk_overlap: int = 150
     auto_index_on_upload: bool = True
+
+    # ---------- OCR（扫描件 PDF） ----------
+    ocr_enabled: bool = True          # 文本提取为空时自动转 OCR
+    ocr_max_pages: int = 30           # 单文档最多 OCR 页数，防超长文档拖垮 CPU
+    ocr_dpi: int = 200                # 渲染分辨率，越高越准越慢
 
     # ---------- 管理员 ----------
     admin_username: str = "admin"

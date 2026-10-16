@@ -15,7 +15,7 @@ import urllib.error
 HOST = "http://localhost:8000"
 
 
-def api(method, path, body=None, token=None):
+def api(method, path, body=None, token=None) -> dict:
     url = f"{HOST}{path}"
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(url, data=data, method=method)
@@ -32,7 +32,62 @@ def api(method, path, body=None, token=None):
 
 token = api("POST", "/api/auth/login",
             {"username": "admin", "password": "admin123456"})["access_token"]
-kb_id = open("/tmp/kb_id.txt").read().strip()
+
+# 定位一个可用于检索验证的知识库：
+#   1) /tmp/kb_id.txt（e2e_test.py --keep 留下的）
+#   2) 已存在且含已就绪文档的库
+#   3) 都没有则自动建一个并灌入测试文档
+def _pick_or_create_kb() -> tuple[str, bool]:
+    try:
+        with open("/tmp/kb_id.txt") as f:
+            return f.read().strip(), False
+    except OSError:
+        pass
+
+    kbs = api("GET", "/api/kb", token=token).get("items", [])
+    usable = [k for k in kbs if k.get("chunk_count", 0) > 0]
+    if usable:
+        return usable[0]["id"], False
+
+    print("未发现可用知识库，自动创建并上传测试文档（首次约需 30s）...")
+    kb = api("POST", "/api/kb", {"name": "_query_rewrite_tmp"}, token)
+    kb_id = kb["id"]
+    import pathlib
+    import uuid as _uuid
+
+    fixture_dir = pathlib.Path(__file__).resolve().parent.parent / "test_fixtures"
+    for fp in sorted(fixture_dir.glob("*"))[:3]:
+        boundary = _uuid.uuid4().hex
+        body = b"".join([
+            f"--{boundary}\r\n".encode(),
+            b'Content-Disposition: form-data; name="file"; filename="'
+            + fp.name.encode() + b'"\r\n',
+            b"Content-Type: application/octet-stream\r\n\r\n",
+            fp.read_bytes(),
+            f"\r\n--{boundary}--\r\n".encode(),
+        ])
+        req = urllib.request.Request(
+            f"{HOST}/api/kb/{kb_id}/documents", data=body, method="POST"
+        )
+        req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+        req.add_header("Authorization", f"Bearer {token}")
+        try:
+            urllib.request.urlopen(req, timeout=120).read()
+        except Exception as e:  # noqa: BLE001
+            print(f"  上传 {fp.name} 失败: {e}")
+
+    # 等索引完成
+    import time as _time
+
+    for _ in range(60):
+        res = api("GET", f"/api/kb/{kb_id}/documents", token=token)
+        if res.get("all_done", True) and res.get("ready", 0) > 0:
+            break
+        _time.sleep(2)
+    return kb_id, True
+
+
+kb_id, _auto_created = _pick_or_create_kb()
 
 cases = [
     ("指代消解", "它有多少天？", None),
@@ -68,6 +123,11 @@ for name, q, expect_hit in cases:
     if expect_hit is not None:
         ok = r.get("kb_hit") == expect_hit
         print(f"  预期      : kb_hit={expect_hit}  {'✓ 符合' if ok else '✗ 不符'}")
+
+# 若本次自动建了临时库，用完即删，避免污染数据
+if _auto_created:
+    api("DELETE", f"/api/kb/{kb_id}", token=token)
+    print(f"\n（已清理自动创建的临时知识库）")
 
 print()
 print("=" * 74)

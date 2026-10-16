@@ -17,7 +17,7 @@
 | 用户反馈"答不上来"，要排查检索 | `test_query_rewrite.py` | 30 秒 |
 | 怀疑流式输出有问题 | `test_stream.py` | 30 秒 |
 | 首次部署 / 换机器，确认环境OK | `start.sh` + `e2e_test.py` | 5 分钟 |
-| 朋友要连你的服务问答 | `ragcli.py` | - |
+| 建库 / 传文档 / 授权 / 问答 | `ragcli.py` | - |
 
 ---
 
@@ -47,15 +47,21 @@ python3 scripts/ragcli.py --host http://IP:8000 -u 用户名 -p 密码 --ask "�
 
 # 检查服务状态（无需登录）
 python3 scripts/ragcli.py --host http://IP:8000 --health
-
-# 管理员命令
-python3 scripts/ragcli.py --host http://IP:8000 -u admin -p 密码 --list-users
-python3 scripts/ragcli.py --host http://IP:8000 -u admin -p 密码 --create-user bob 密码123
-python3 scripts/ragcli.py --host http://IP:8000 -u admin -p 密码 --stats
 ```
 
-交互模式下的命令：`/kb` 选知识库、`/web on|off` 切联网、`/sources` 看引用来源、
-`/new` 新会话、`/quit` 退出。
+**管理知识库/用户**（建库、上传文档、授权、统计等）看 `--help`：
+
+```bash
+python3 scripts/ragcli.py --help
+```
+
+典型上手顺序：`--create-kb` 建库 → `--kb X --upload 文件` 传文档 →
+`--kb X --wait` 等索引（必须等，否则检索不到）→ `--kb X --grant 用户` 授权 → 提问。
+
+交互模式下的命令：`/kb` 选知识库、`/new-kb` 建库、`/add` 上传文档、`/docs` 看文档状态、
+`/wait` 等索引、`/web on|off` 切联网、`/sources` 看引用来源、`/new` 新会话、`/quit` 退出。
+
+> 没有知识库时不会退出，会进入交互模式并提示用 `/new-kb` 创建。
 
 把 `ragcli.py` 单个文件发给朋友即可，不需要给整个项目。
 
@@ -133,6 +139,9 @@ python3 scripts/test_stream.py
 验证事件序列完整性，并判断是否**真流式**（有 128 次 delta 事件、
 分散在多个时间片），而不是后端一次性返回。
 
+知识库自动选取：优先 `/tmp/kb_id.txt`，否则取第一个含已就绪文档的库。
+都没有时会提示先跑 `e2e_test.py --keep` 准备数据。
+
 ---
 
 ### test_query_rewrite.py — Query 改写与相关度判定验证
@@ -142,6 +151,9 @@ python3 scripts/test_stream.py
 ```bash
 python3 scripts/test_query_rewrite.py
 ```
+
+无需预先准备数据：找不到可用知识库时会自动建一个临时库、上传测试文档、
+等索引完成后跑验证，结束后自动删除临时库。
 
 5 个场景，会打印每一步的中间结果：
 

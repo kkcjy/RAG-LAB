@@ -7,6 +7,10 @@
 .env.local
 .env.*.local
 *.env
+# 备份/衍生文件（.env.bak、.env.old、.env~ 等同样含密钥）
+.env.*
+.env~
+*.env.*
 !.env.example
 
 # ---------- 运行时数据 ----------

@@ -184,6 +184,16 @@ async def delete_user(
         raise HTTPException(status_code=400, detail="不能删除自己的账户")
 
     username = user.username
+
+    # 该用户名下的知识库移交给执行删除的管理员。
+    # 若不处理，owner_id 会被置 NULL（外键 SET NULL），
+    # 知识库变成"无主库"——普通用户失去入口且无人能管理。
+    owned_kbs = (
+        await db.execute(select(KnowledgeBase).where(KnowledgeBase.owner_id == user.id))
+    ).scalars().all()
+    for kb in owned_kbs:
+        kb.owner_id = admin.id
+
     await db.delete(user)
     await db.commit()
 
@@ -193,9 +203,14 @@ async def delete_user(
         user_id=admin.id,
         username=admin.username,
         resource=username,
+        detail={"transferred_kbs": [kb.name for kb in owned_kbs]},
         ip=client_ip(request),
     )
-    return {"message": f"用户 {username} 已删除"}
+
+    msg = f"用户 {username} 已删除"
+    if owned_kbs:
+        msg += f"，其名下 {len(owned_kbs)} 个知识库已移交给 {admin.username}"
+    return {"message": msg, "transferred_kbs": len(owned_kbs)}
 
 
 # ===========================================================================

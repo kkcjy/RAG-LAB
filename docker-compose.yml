@@ -1,11 +1,11 @@
 # ---------------------------------------------------------------------------
-#  RAG-lab 一键编排
+#  RAG-LAB 一键编排
 #  后端 + PostgreSQL + Qdrant + Redis
 #  启动： docker compose up -d --build
 #  查看： docker compose ps
 #  日志： docker compose logs -f backend
 # ---------------------------------------------------------------------------
-name: raglab
+name: rag-lab
 
 services:
   # ---------------------------------------------------------------- 后端
@@ -13,7 +13,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: raglab-backend
+    container_name: rag-lab-backend
     restart: unless-stopped
     env_file:
       - .env
@@ -35,16 +35,18 @@ services:
       redis:
         condition: service_healthy
     networks:
-      - raglab-net
+      - rag-lab-net
     extra_hosts:
       - "host.docker.internal:host-gateway"      # 访问宿主机上的 vLLM
 
   # ------------------------------------------------------------ PostgreSQL
   postgres:
     image: postgres:16-alpine
-    container_name: raglab-postgres
+    container_name: rag-lab-postgres
     restart: unless-stopped
     environment:
+      # 注意：POSTGRES_USER/DB 保持 raglab 不变。
+      # 这两个值只在数据卷首次初始化时生效，改动会导致已有数据不可读。
       POSTGRES_USER: ${POSTGRES_USER:-raglab}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-raglab_pass_change_me}
       POSTGRES_DB: ${POSTGRES_DB:-raglab}
@@ -60,12 +62,12 @@ services:
       retries: 5
       start_period: 20s
     networks:
-      - raglab-net
+      - rag-lab-net
 
   # ---------------------------------------------------------------- Qdrant
   qdrant:
     image: qdrant/qdrant:v1.12.4
-    container_name: raglab-qdrant
+    container_name: rag-lab-qdrant
     restart: unless-stopped
     volumes:
       - qdrant_data:/qdrant/storage
@@ -82,12 +84,12 @@ services:
       retries: 5
       start_period: 20s
     networks:
-      - raglab-net
+      - rag-lab-net
 
   # ----------------------------------------------------------------- Redis
   redis:
     image: redis:7-alpine
-    container_name: raglab-redis
+    container_name: rag-lab-redis
     restart: unless-stopped
     command: redis-server --appendonly yes
     volumes:
@@ -101,17 +103,24 @@ services:
       retries: 5
       start_period: 10s
     networks:
-      - raglab-net
+      - rag-lab-net
 
 volumes:
+  # 卷名已从 raglab-* 迁移为 rag-lab-*（数据已复制保留）
+  # 这三个卷由历史迁移手工创建、不带 Compose 标签，
+  # 因此声明为 external，避免每次 up 都告警 "not created by Docker Compose"。
+  # external 卷不会在 `docker compose down -v` 时被删除，数据更安全。
   pgdata:
-    name: raglab-pgdata
+    name: rag-lab-pgdata
+    external: true
   qdrant_data:
-    name: raglab-qdrant-data
+    name: rag-lab-qdrant-data
+    external: true
   redis_data:
-    name: raglab-redis-data
+    name: rag-lab-redis-data
+    external: true
 
 networks:
-  raglab-net:
-    name: raglab-net
+  rag-lab-net:
+    name: rag-lab-net
     driver: bridge

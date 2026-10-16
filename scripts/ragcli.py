@@ -1,32 +1,32 @@
 #!/usr/bin/env python3
 """
-RAG-lab 终端客户端
+RAG-LAB 终端客户端
 
 朋友通过终端连接问答的使用方式。仅依赖标准库（urllib），
 不需要安装任何第三方包。
 
 用法:
-    # 登录并进入交互式问答
+    # 交互式问答（最常用）
     python3 scripts/ragcli.py --host http://1.2.3.4:8000
-
-    # 直接带账号密码（免交互输入）
-    python3 scripts/ragcli.py --host http://1.2.3.4:8000 -u user1 -p pass123
 
     # 单次提问
     python3 scripts/ragcli.py --host http://1.2.3.4:8000 -u user1 -p pass --ask "报销流程是什么"
 
-    # 管理命令
-    python3 scripts/ragcli.py --host ... -u admin -p pass --list-users
-    python3 scripts/ragcli.py --host ... -u admin -p pass --create-user bob secret123
+    # 管理知识库/用户（建库、上传文档、授权等）
+    python3 scripts/ragcli.py --help
 """
 from __future__ import annotations
 
 import argparse
 import getpass
 import json
+import mimetypes
+import os
 import sys
+import time
 import urllib.error
 import urllib.request
+import uuid
 
 GREEN = "\033[0;32m"
 RED = "\033[0;31m"
@@ -67,6 +67,37 @@ class APIClient:
         except urllib.error.URLError as e:
             raise RuntimeError(f"连接失败: {e.reason}") from e
 
+    def _request_multipart(self, path: str, field_name: str, filename: str, content: bytes):
+        """纯标准库构造 multipart/form-data 上传文件（避免依赖 requests）。"""
+        boundary = uuid.uuid4().hex
+        ctype = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        safe_name = os.path.basename(filename).encode("utf-8")
+        body = b"".join([
+            f"--{boundary}\r\n".encode(),
+            b'Content-Disposition: form-data; name="' + field_name.encode() + b'"; filename="'
+            + safe_name + b'"\r\n',
+            f"Content-Type: {ctype}\r\n\r\n".encode(),
+            content,
+            f"\r\n--{boundary}--\r\n".encode(),
+        ])
+        req = urllib.request.Request(f"{self.host}{path}", data=body, method="POST")
+        req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+        if self.token:
+            req.add_header("Authorization", f"Bearer {self.token}")
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                raw = resp.read().decode()
+                return json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="ignore")
+            try:
+                detail = json.loads(detail).get("detail", detail)
+            except Exception:
+                pass
+            raise RuntimeError(f"HTTP {e.code}: {detail}") from e
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"连接失败: {e.reason}") from e
+
     # ---------------- 认证 ----------------
     def login(self, username: str, password: str) -> dict:
         res = self._request("POST", "/api/auth/login", {"username": username, "password": password})
@@ -83,8 +114,45 @@ class APIClient:
     def list_kbs(self) -> dict:
         return self._request("GET", "/api/kb")
 
+    def create_kb(self, name: str) -> dict:
+        return self._request("POST", "/api/kb", {"name": name})
+
+    def delete_kb(self, kb_id: str) -> dict:
+        return self._request("DELETE", f"/api/kb/{kb_id}")
+
     def list_docs(self, kb_id: str) -> dict:
         return self._request("GET", f"/api/kb/{kb_id}/documents")
+
+    def upload_doc(self, kb_id: str, filepath: str) -> dict:
+        with open(filepath, "rb") as f:
+            content = f.read()
+        return self._request_multipart(
+            f"/api/kb/{kb_id}/documents", "file", os.path.basename(filepath), content
+        )
+
+    def grant_permission(self, kb_id: str, user_id: str) -> dict:
+        return self._request(
+            "POST", f"/api/kb/{kb_id}/permissions",
+            {"user_id": user_id, "can_read": True, "can_write": False},
+        )
+
+    def list_permissions(self, kb_id: str) -> dict:
+        return self._request("GET", f"/api/kb/{kb_id}/permissions")
+
+    def find_user_id(self, username: str) -> str | None:
+        """按用户名查 UUID（授权接口需要 UUID）。"""
+        res = self._request("GET", "/api/admin/users")
+        for u in res.get("items", []):
+            if u["username"] == username:
+                return u["id"]
+        return None
+
+    def resolve_kb(self, ref: str) -> dict | None:
+        """按名称（模糊）或 ID 定位知识库。"""
+        for kb in self.list_kbs().get("items", []):
+            if kb["id"] == ref or ref.lower() in kb["name"].lower():
+                return kb
+        return None
 
     # ---------------- 问答 ----------------
     def ask(self, query: str, kb_id: str, session_id: str | None = None,
@@ -124,14 +192,79 @@ class APIClient:
 
 
 # ---------------------------------------------------------------------------
+def _print_index_summary(res: dict) -> None:
+    """打印索引进度汇总（来自后端 DocListOut 的新字段）"""
+    indexing = res.get("indexing", 0)
+    ready = res.get("ready", 0)
+    failed = res.get("failed", 0)
+    if indexing:
+        print(f"{YELLOW}  索引中 {indexing} 个"
+              f"（已就绪 {ready}，失败 {failed}）—— 完成后才能检索到{NC}")
+    elif failed:
+        print(f"{RED}  ✗ {failed} 个文档索引失败，{ready} 个可用{NC}")
+    elif ready:
+        print(f"{DIM}  ✓ {ready} 个文档已就绪{NC}")
+
+
+def _wait_for_index(client: APIClient, kb_id: str, kb_name: str,
+                    timeout: float = 600.0) -> int:
+    """轮询等所有文档索引完成。返回 0=全部就绪, 1=有失败或超时。"""
+    terminal_states = {"ready", "failed"}
+    start = time.time()
+    last_line = ""
+    while True:
+        try:
+            docs = client.list_docs(kb_id).get("items", [])
+        except RuntimeError as e:
+            print(f"\n{RED}{e}{NC}")
+            return 1
+
+        if not docs:
+            print(f"{YELLOW}该知识库暂无文档{NC}")
+            return 0
+
+        done = sum(1 for d in docs if d.get("status") in terminal_states)
+        ready = sum(1 for d in docs if d.get("status") == "ready")
+        failed = sum(1 for d in docs if d.get("status") == "failed")
+        elapsed = time.time() - start
+
+        line = (f"\r{DIM}索引中 {done}/{len(docs)}  "
+                f"(就绪 {ready}, 失败 {failed})  已用 {elapsed:.0f}s{NC}")
+        print(line + " " * max(0, len(last_line) - len(line)), end="", flush=True)
+        last_line = line
+
+        if done == len(docs):
+            print()
+            if failed:
+                print(f"{RED}✗ {failed} 个文档索引失败{NC}")
+                for d in docs:
+                    if d.get("status") == "failed":
+                        print(f"  {d['filename']}: {d.get('error_message', '未知错误')}")
+                return 1
+            print(f"{GREEN}✓ {ready} 个文档已全部就绪，可以提问了{NC}")
+            return 0
+
+        if elapsed > timeout:
+            print()
+            print(f"{YELLOW}等待超时（{timeout:.0f}s），仍有文档未完成{NC}")
+            for d in docs:
+                if d.get("status") not in terminal_states:
+                    print(f"  {d['filename']}: {d.get('status')}")
+            return 1
+
+        time.sleep(2)
+
+
+# ---------------------------------------------------------------------------
 def print_banner(user: dict, host: str) -> None:
     role = "管理员" if user.get("role") == "admin" else "普通用户"
     print(f"{GREEN}{'=' * 62}{NC}")
-    print(f"{BOLD}  RAG-lab 终端问答{NC}")
+    print(f"{BOLD}  RAG-LAB 终端问答{NC}")
     print(f"  服务器: {host}")
     print(f"  当前用户: {user.get('username')} ({role})")
     print(f"{GREEN}{'=' * 62}{NC}")
-    print(f"{DIM}  命令: /help 帮助 | /kb 选择知识库 | /web 切换联网 | /new 新会话 | /quit 退出{NC}")
+    print(f"{DIM}  命令: /help 帮助 | /kb 选择知识库 | /new-kb 建库 | /add 上传 | "
+          f"/web 联网 | /new 新会话 | /quit 退出{NC}")
 
 
 def print_help() -> None:
@@ -140,6 +273,10 @@ def print_help() -> None:
   /help            显示本帮助
   /kb              列出并选择知识库
   /kb <名称或ID>   直接切换到指定知识库
+  /new-kb <名称>   创建知识库并切换过去
+  /add <文件...>   上传文档到当前知识库
+  /docs            列出当前知识库的文档与索引状态
+  /wait            等待索引完成
   /web on|off      开启/关闭联网搜索
   /new             开始新会话
   /sources         显示上一条回答的引用来源
@@ -155,6 +292,12 @@ def interactive(client: APIClient, user: dict, kb_id: str | None, kb_name: str) 
     print_banner(user, client.host)
     print(f"  当前知识库: {CYAN}{kb_name or '未选择'}{NC}   联网: "
           f"{CYAN}{'开' if enable_web else '关'}{NC}")
+    if not kb_id:
+        if user.get("role") == "admin":
+            print(f"{YELLOW}  当前没有知识库。输入 /new-kb <名称> 创建一个，"
+                  f"再用 /add <文件> 上传文档。{NC}")
+        else:
+            print(f"{YELLOW}  当前没有可访问的知识库，请联系管理员授权。{NC}")
     print()
 
     while True:
@@ -185,6 +328,70 @@ def interactive(client: APIClient, user: dict, kb_id: str | None, kb_name: str) 
             if cmd == "/new":
                 session_id = None
                 print(f"{DIM}已开始新会话{NC}")
+                continue
+
+            if cmd == "/new-kb":
+                if not arg:
+                    print(f"{YELLOW}用法: /new-kb <知识库名称>{NC}")
+                    continue
+                try:
+                    kb = client.create_kb(arg)
+                    kb_id, kb_name = kb["id"], kb["name"]
+                    session_id = None
+                    print(f"{GREEN}✓ 已创建并切换到: {kb_name}{NC}")
+                    print(f"{DIM}  下一步: /add <文件路径> 上传文档{NC}")
+                except RuntimeError as e:
+                    print(f"{RED}{e}{NC}")
+                continue
+
+            if cmd == "/add":
+                if not arg:
+                    print(f"{YELLOW}用法: /add <文件路径> [更多文件...]{NC}")
+                    continue
+                if not kb_id:
+                    print(f"{YELLOW}请先选择或创建知识库（/kb 或 /new-kb）{NC}")
+                    continue
+                for fp in arg.split():
+                    if not os.path.isfile(fp):
+                        print(f"{RED}✗ 文件不存在: {fp}{NC}")
+                        continue
+                    try:
+                        d = client.upload_doc(kb_id, fp)
+                        print(f"{GREEN}✓ 已上传: {d.get('filename', os.path.basename(fp))}{NC}"
+                              f"  {DIM}(status={d.get('status')}){NC}")
+                    except RuntimeError as e:
+                        print(f"{RED}✗ {os.path.basename(fp)} 上传失败: {e}{NC}")
+                print(f"{YELLOW}  索引为异步执行，用 /wait 等待完成后再提问{NC}")
+                continue
+
+            if cmd == "/docs":
+                if not kb_id:
+                    print(f"{YELLOW}请先选择知识库（/kb）{NC}")
+                    continue
+                try:
+                    res = client.list_docs(kb_id)
+                    docs = res.get("items", [])
+                    if not docs:
+                        print(f"{YELLOW}该知识库暂无文档（用 /add 上传）{NC}")
+                        continue
+                    print(f"\n{BOLD}{kb_name} 的文档（共 {len(docs)}）{NC}")
+                    for d in docs:
+                        flag = {"ready": "✓", "failed": "✗"}.get(d.get("status"), "…")
+                        print(f"  {flag} {d['filename']:<32} {d.get('status'):<10} "
+                              f"分块 {d.get('chunk_count', 0)}")
+                        if d.get("error_message"):
+                            print(f"      {RED}{d['error_message']}{NC}")
+                    _print_index_summary(res)
+                    print()
+                except RuntimeError as e:
+                    print(f"{RED}{e}{NC}")
+                continue
+
+            if cmd == "/wait":
+                if not kb_id:
+                    print(f"{YELLOW}请先选择知识库（/kb）{NC}")
+                    continue
+                _wait_for_index(client, kb_id, kb_name)
                 continue
 
             if cmd == "/web":
@@ -272,7 +479,7 @@ def interactive(client: APIClient, user: dict, kb_id: str | None, kb_name: str) 
                     if stage in ("rewrite", "retrieve"):
                         print(f"{DIM}· {data.get('message')}{NC}")
                     elif stage == "generate":
-                        print(f"{GREEN}RAG-lab{NC}> ", end="", flush=True)
+                        print(f"{GREEN}RAG-LAB{NC}> ", end="", flush=True)
 
                 elif etype == "sources":
                     last_sources = data
@@ -308,7 +515,7 @@ def interactive(client: APIClient, user: dict, kb_id: str | None, kb_name: str) 
 
 # ---------------------------------------------------------------------------
 def main() -> int:
-    ap = argparse.ArgumentParser(description="RAG-lab 终端客户端")
+    ap = argparse.ArgumentParser(description="RAG-LAB 终端客户端")
     ap.add_argument("--host", default="http://localhost:8000", help="服务地址")
     ap.add_argument("-u", "--user", help="用户名")
     ap.add_argument("-p", "--password", help="密码")
@@ -316,6 +523,17 @@ def main() -> int:
     ap.add_argument("--ask", help="单次提问后退出")
     ap.add_argument("--no-web", action="store_true", help="禁用联网搜索")
     ap.add_argument("--health", action="store_true", help="仅检查服务健康状态")
+    ap.add_argument("--list-kbs", action="store_true", help="列出知识库")
+    ap.add_argument("--create-kb", metavar="NAME", help="创建知识库")
+    ap.add_argument("--delete-kb", action="store_true",
+                    help="配合 --kb 删除知识库（含全部文档与向量）")
+    ap.add_argument("--upload", nargs="+", metavar="FILE",
+                    help="配合 --kb 上传一个或多个文档")
+    ap.add_argument("--docs", action="store_true", help="配合 --kb 列出文档")
+    ap.add_argument("--wait", action="store_true",
+                    help="配合 --kb 等待所有文档索引完成")
+    ap.add_argument("--grant", metavar="USERNAME", help="配合 --kb 授权用户读取")
+    ap.add_argument("--perms", action="store_true", help="配合 --kb 查看授权列表")
     ap.add_argument("--list-users", action="store_true", help="列出用户（需管理员）")
     ap.add_argument("--create-user", nargs=2, metavar=("NAME", "PASSWORD"),
                     help="创建用户（需管理员）")
@@ -333,7 +551,11 @@ def main() -> int:
                   f"{'✓' if h['llm_ok'] else '✗'}")
             print(f"  Embedding: {h['embedding_provider']} (dim={h['embedding_dim']})")
             print(f"  向量库:    {'✓' if h['vector_store_ok'] else '✗'}")
-            print(f"  联网搜索:  {h['web_search_provider']}")
+            web_ok = h.get("web_search_enabled", False)
+            print(f"  联网搜索:  {h['web_search_provider']}  "
+                  f"{'✓' if web_ok else '✗ 不可用'}")
+            for w in h.get("warnings", []):
+                print(f"{YELLOW}  ⚠ {w}{NC}")
             return 0 if h["status"] == "ok" else 1
         except RuntimeError as e:
             print(f"{RED}{e}{NC}")
@@ -349,6 +571,17 @@ def main() -> int:
     except RuntimeError as e:
         print(f"{RED}登录失败: {e}{NC}")
         return 1
+
+    # 交互模式会打印 banner（已含用户信息），其余命令这里给个登录确认。
+    # 判据：除 --host/-u/-p 外的参数一旦出现，就是非交互调用。
+    conn_opts = {"--host", "-u", "--user", "-p", "--password"}
+    has_action = any(
+        a != "-h" and (a.startswith("-") and a.split("=")[0] not in conn_opts)
+        for a in sys.argv[1:]
+    )
+    if has_action:
+        role = "管理员" if user.get("role") == "admin" else "普通用户"
+        print(f"{GREEN}✓ 已登录: {user.get('username')} ({role}){NC}")
 
     # 管理命令
     if args.list_users:
@@ -391,17 +624,126 @@ def main() -> int:
             print(f"{RED}{e}{NC}")
             return 1
 
+    # ---------------- 知识库管理命令 ----------------
+
+    if args.list_kbs:
+        try:
+            kbs = client.list_kbs().get("items", [])
+            if not kbs:
+                print(f"{YELLOW}没有可访问的知识库{NC}")
+                return 0
+            print(f"{BOLD}知识库（共 {len(kbs)}）{NC}")
+            print(f"  {'名称':<22} {'文档':<6} {'分块':<8} {'公开':<6} {'ID'}")
+            print("  " + "-" * 72)
+            for kb in kbs:
+                pub = "是" if kb.get("is_public") else "否"
+                print(f"  {kb['name']:<22} {kb['doc_count']:<6} {kb['chunk_count']:<8} "
+                      f"{pub:<6} {kb['id']}")
+            return 0
+        except RuntimeError as e:
+            print(f"{RED}{e}{NC}")
+            return 1
+
+    if args.create_kb:
+        try:
+            kb = client.create_kb(args.create_kb)
+            print(f"{GREEN}✓ 知识库已创建: {kb['name']}{NC}")
+            print(f"{DIM}  ID: {kb['id']}{NC}")
+            print(f"{DIM}  下一步: --kb {kb['name']} --upload 文件路径{NC}")
+            return 0
+        except RuntimeError as e:
+            print(f"{RED}{e}{NC}")
+            return 1
+
+    # 以下命令都需要 --kb
+    needs_kb = (args.upload or args.docs or args.wait or args.delete_kb
+                or args.grant or args.perms)
+    if needs_kb:
+        if not args.kb:
+            print(f"{RED}需要指定知识库: 加 --kb <名称或ID>{NC}")
+            return 1
+        try:
+            kb = client.resolve_kb(args.kb)
+        except RuntimeError as e:
+            print(f"{RED}{e}{NC}")
+            return 1
+        if kb is None:
+            print(f"{RED}未找到知识库: {args.kb}{NC}")
+            return 1
+
+        try:
+            if args.delete_kb:
+                res = client.delete_kb(kb["id"])
+                print(f"{GREEN}✓ {res.get('message', '已删除')}{NC}")
+                return 0
+
+            if args.docs:
+                res = client.list_docs(kb["id"])
+                docs = res.get("items", [])
+                if not docs:
+                    print(f"{YELLOW}该知识库暂无文档{NC}")
+                    return 0
+                print(f"{BOLD}{kb['name']} 的文档（共 {len(docs)}）{NC}")
+                for d in docs:
+                    flag = {"ready": "✓", "failed": "✗"}.get(d.get("status"), "…")
+                    print(f"  {flag} {d['filename']:<32} {d.get('status'):<10} "
+                          f"分块 {d.get('chunk_count', 0)}")
+                    if d.get("error_message"):
+                        print(f"      {RED}{d['error_message']}{NC}")
+                _print_index_summary(res)
+                return 0
+
+            if args.upload:
+                ok, fail = 0, 0
+                for fp in args.upload:
+                    if not os.path.isfile(fp):
+                        print(f"{RED}✗ 文件不存在: {fp}{NC}")
+                        fail += 1
+                        continue
+                    try:
+                        d = client.upload_doc(kb["id"], fp)
+                        print(f"{GREEN}✓ 已上传: {d.get('filename', os.path.basename(fp))}"
+                              f"{NC}  {DIM}(status={d.get('status')}){NC}")
+                        ok += 1
+                    except RuntimeError as e:
+                        print(f"{RED}✗ {os.path.basename(fp)} 上传失败: {e}{NC}")
+                        fail += 1
+                if ok:
+                    print(f"{YELLOW}  索引为异步执行，用 --wait 等待完成后再提问{NC}")
+                return 1 if fail and not ok else 0
+
+            if args.wait:
+                return _wait_for_index(client, kb["id"], kb["name"])
+
+            if args.perms:
+                res = client.list_permissions(kb["id"])
+                items = res.get("items", res) if isinstance(res, dict) else res
+                if not items:
+                    print(f"{YELLOW}该知识库暂无授权（仅创建者/管理员可访问）{NC}")
+                    return 0
+                print(f"{BOLD}{kb['name']} 的授权{NC}")
+                for p in items:
+                    print(f"  {p.get('username') or p.get('user_id')}  "
+                          f"读={'是' if p.get('can_read') else '否'}")
+                return 0
+
+            if args.grant:
+                uid = client.find_user_id(args.grant)
+                if uid is None:
+                    print(f"{RED}用户不存在: {args.grant}{NC}")
+                    return 1
+                client.grant_permission(kb["id"], uid)
+                print(f"{GREEN}✓ 已授权 {args.grant} 只读访问 '{kb['name']}'{NC}")
+                return 0
+        except RuntimeError as e:
+            print(f"{RED}{e}{NC}")
+            return 1
+
     # 选择知识库
     kb_id: str | None = None
     kb_name = ""
     try:
         kbs = client.list_kbs().get("items", [])
-        if not kbs:
-            print(f"{YELLOW}当前账号没有可访问的知识库。{NC}")
-            if user.get("role") == "admin":
-                print(f"{DIM}提示: 使用 API 创建知识库，或联系管理员授权。{NC}")
-                print(f"{DIM}      POST {args.host}/api/kb  {{\"name\": \"我的知识库\"}}{NC}")
-            return 1
 
         if args.kb:
             matched = [k for k in kbs if args.kb.lower() in k["name"].lower() or k["id"] == args.kb]
@@ -411,7 +753,7 @@ def main() -> int:
             kb_id, kb_name = matched[0]["id"], matched[0]["name"]
         elif len(kbs) == 1:
             kb_id, kb_name = kbs[0]["id"], kbs[0]["name"]
-        else:
+        elif len(kbs) > 1:
             print(f"{BOLD}请选择知识库{NC}")
             for i, kb in enumerate(kbs, 1):
                 print(f"  {i}. {kb['name']}  "
@@ -423,6 +765,11 @@ def main() -> int:
             kb_id, kb_name = kbs[int(sel) - 1]["id"], kbs[int(sel) - 1]["name"]
     except RuntimeError as e:
         print(f"{RED}{e}{NC}")
+        return 1
+
+    # 单次提问需要知识库
+    if args.ask and not kb_id:
+        print(f"{RED}无法提问：没有可用的知识库。{NC}")
         return 1
 
     # 单次提问

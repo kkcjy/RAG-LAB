@@ -174,6 +174,16 @@ for rel in required_files:
         errors.append(f"缺少必需文件: {rel}")
 
 # .env.example 与 config.py 的字段对齐检查
+# 由第三方库直接读取、不经 pydantic Settings 的标准环境变量，不算字段缺失
+_EXTERNAL_ENV_KEYS = {
+    "hf_home",           # huggingface_hub 直接读取
+    "hf_endpoint",       # huggingface_hub 直接读取
+    "hf_hub_offline",
+    "transformers_offline",
+    "torch_home",
+    "no_proxy", "http_proxy", "https_proxy",
+    "tz",
+}
 env_src = (ROOT / ".env.example").read_text(encoding="utf-8")
 env_keys = {
     line.split("=", 1)[0].strip().lower()
@@ -189,7 +199,7 @@ for node in ast.walk(cfg_tree):
             if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
                 cfg_fields.add(item.target.id)
 
-missing_in_cfg = env_keys - cfg_fields
+missing_in_cfg = env_keys - cfg_fields - _EXTERNAL_ENV_KEYS
 missing_in_env = cfg_fields - env_keys
 
 if missing_in_cfg:

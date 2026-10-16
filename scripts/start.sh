@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# RAG-lab 启动脚本
+# RAG-LAB 启动脚本
 #   ./scripts/start.sh          启动全部服务
 #   ./scripts/start.sh --build  重新构建镜像后启动
 # ---------------------------------------------------------------------------
@@ -8,10 +8,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; DIM='\033[2m'; NC='\033[0m'
 
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}  RAG-lab 启动${NC}"
+echo -e "${GREEN}  RAG-LAB 启动${NC}"
 echo -e "${GREEN}========================================${NC}"
 
 # 1) 检查 .env
@@ -72,4 +72,11 @@ docker compose ps
 echo ""
 echo -e "${GREEN}API 文档:  http://localhost:8000/docs${NC}"
 echo -e "${GREEN}健康检查:  http://localhost:8000/api/health${NC}"
-echo -e "${GREEN}默认管理员: admin / admin123456${NC}"
+
+# 从 .env 读实际的管理员账号（不要写死，改过密码就误导）
+ADMIN_USER=$(grep -E '^ADMIN_USERNAME=' .env | head -1 | cut -d'=' -f2-)
+ADMIN_PWD=$(grep -E '^ADMIN_PASSWORD=' .env | head -1 | cut -d'=' -f2-)
+if [ -n "$ADMIN_USER" ]; then
+    echo -e "${GREEN}默认管理员: ${ADMIN_USER} / ${ADMIN_PWD}${NC}  ${DIM}(来自 .env，仅首次启动创建时生效)${NC}"
+    echo -e "${DIM}  若已改过密码，此提示不再有效${NC}"
+fi

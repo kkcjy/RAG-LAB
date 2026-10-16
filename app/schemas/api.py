@@ -132,6 +132,11 @@ class DocOut(BaseModel):
 class DocListOut(BaseModel):
     total: int
     items: list[DocOut]
+    # 索引进度汇总：便于调用方判断"是否可以提问了"
+    indexing: int = 0          # 正在处理（pending/parsing/indexing）
+    ready: int = 0             # 已完成
+    failed: int = 0            # 失败
+    all_done: bool = True      # 是否全部到达终态（可安全提问）
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +220,10 @@ class HealthOut(BaseModel):
     embedding_dim: int
     vector_store_ok: bool
     web_search_provider: str
+    # 联网搜索是否真正可用（配了 key 且 provider 不是 Null）
+    web_search_enabled: bool = False
+    # 供人或脚本快速判断的告警列表（如"未配置 TAVILY_API_KEY"）
+    warnings: list[str] = []
 
 
 TokenResponse.model_rebuild()
