@@ -30,12 +30,16 @@ def create_access_token(
     role: str = "user",
     extra: Optional[dict[str, Any]] = None,
     expires_minutes: Optional[int] = None,
+    token_version: int = 0,
 ) -> str:
     expire_minutes = expires_minutes or settings.access_token_expire_minutes
     now = dt.datetime.now(dt.timezone.utc)
     payload: dict[str, Any] = {
         "sub": subject,
         "role": role,
+        # token 版本号：用户改密码/改角色/被禁用时递增，
+        # 使此前签发的 token 立即失效（见 deps.get_current_user）
+        "tv": token_version,
         "iat": now,
         "exp": now + dt.timedelta(minutes=expire_minutes),
     }

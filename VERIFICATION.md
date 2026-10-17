@@ -4,7 +4,11 @@
 避免把未验证的部分误认为可用。
 
 验证日期：2026-10-15（首次验证）/ 2026-10-16（代码审查与缺陷修复后复验）
+         / 2026-10-17（换机复验：补配 Tavily key，端到端 25/25）
 验证环境：Ubuntu 20.04 / Docker 28.1.1 / Compose v2.35.1 / 15GB 内存 / 无可用 GPU
+2026-10-17 复验环境：WSL2 Ubuntu 22.04 / Docker 28.4.0 / Compose v2.39.4 /
+        mirrored 网络模式（宿主机端口需避开被 Windows 占用的 8000、6379，
+        本项目改发布为 backend 18000、redis 16379）
 
 ---
 
@@ -45,7 +49,7 @@
 
 | 格式 | 文件 | 结果 | 解析器 |
 |---|---|---|---|
-| PDF | 白皮书.pdf | ✓ 334 字符，中文无乱码 | pymupdf |
+| PDF | DSR_protocol.pdf | ✓ 67013 字符，97 块，英文论文无乱码 | pymupdf |
 | Word | 供应商管理办法.docx | ✓ 343 字符，表格正确提取 | python-docx |
 | Markdown | 员工手册.md | ✓ 763 字符 | plain |
 | TXT | 系统说明.txt | ✓ 634 字符 | plain |
@@ -75,28 +79,30 @@ C级 | 75分以下 | 限制采购，限期整改
 ### 1.5 分块算法
 
 ```
-✓ 短文档：394-790 字符/块，单块不超限
-✓ 长文档：8521 字符 → 14 块
-         最短 394 / 最长 790 / 平均 606 字符
-✓ overlap 生效（相邻块有 150 字符重叠）
+✓ 短文档：单块不超 chunk_size
+✓ 长文档：67013 字符 → 97 块（DSR_protocol.pdf，英文论文）
+✓ overlap 生效（相邻块重叠 150 字符，见第四节缺陷 17）
 ✓ 切分点落在段落边界，不切断句子
 ✓ 46 项核心逻辑断言全部通过（scripts/verify_core.py）
 ```
 
 ### 1.6 完整链路（端到端测试）
 
-`scripts/e2e_test.py` 实测结果：**24/24 通过**
+`scripts/e2e_test.py` 实测结果：**25/25 通过**（2026-10-17 复验，含 LLM 生成与联网搜索）
 
 ```
 [1] 服务健康        ✓ 健康接口 / 向量库连通 / Embedding dim=1024
 [2] 认证            ✓ 管理员登录、JWT 签发
 [3] 知识库          ✓ 创建成功
-[4] 文档上传        ✓ 5 种文档全部上传
-[5] 索引            ✓ 5/5 就绪，18 个分块，耗时 30s
+[4] 文档上传        ✓ 4 种文档全部上传
+[5] 索引            ✓ 4/4 就绪，100 个分块，耗时 57s
 [6] 分块入库校验    ✓ 统计数与实际数一致
 [7] 向量检索质量    ✓ 5/5 命中正确文档
+[7.5] 生成问答      ✓ LLM 生成回答，引用 5 条（需 DEEPSEEK_API_KEY）
 [8] 清理            ✓ 删除知识库，向量同步清理
 ```
+
+索引耗时随机器而异：首次验证 30s，换机复验 15s；DSR 论文（97 块）约 57s。
 
 检索质量详情：
 
@@ -105,7 +111,7 @@ C级 | 75分以下 | 限制采购，限期整改
 | 年假有多少天 | 员工手册.md | 员工手册.md | 0.621 |
 | 报销流程是什么 | 员工手册.md | 员工手册.md | 0.553 |
 | 向量检索的原理是什么 | 系统说明.txt | 系统说明.txt | 0.587 |
-| 技术指标里的向量维度是多少 | 白皮书.pdf | 白皮书.pdf | 0.644 |
+| DSR 协议解决什么问题 | DSR_protocol.pdf | DSR_protocol.pdf | 0.613 |
 | 供应商评级标准 | 供应商管理办法.docx | 供应商管理办法.docx | 0.717 |
 
 说明：语义检索有效（"年假"匹配到"年休假制度"），阈值 0.5 设置合理。
@@ -194,22 +200,35 @@ C级 | 75分以下 | 限制采购，限期整改
 
 ---
 
+### 2.7 联网搜索（Tavily）
+
+2026-10-17 补齐 `TAVILY_API_KEY` 后实测通过。
+
+```
+✓ 健康检查 web_search_provider 由 NullWebSearch → TavilyWebSearch，
+  web_search_enabled=true，warnings 清空
+  （此前会提示「已启用兜底但 provider 不可用」，即第四节缺陷 15）
+✓ 知识库未命中（kb_hit=False）时自动联网兜底，used_web_search=True
+✓ 返回 5 条真实网页来源，含可点击 url
+✓ 回答明确标注「知识库中未找到相关内容，以下信息来自网络搜索结果」
+✓ 引用编号 [1][3] 正确对应网页来源
+✓ Query 自动改写：口语化问题 → 检索用查询串
+✓ 搜索服务故障时不再伪装成"没有结果"：web_search_error 字段给出原因
+  （第四节缺陷 36），与"搜到了但无结果"可区分
+```
+
+---
+
 ## 三、未验证
 
 | 功能 | 依赖 | 说明 |
 |---|---|---|
-| Tavily 联网搜索 | TAVILY_API_KEY | 本机无该 key，需注册（免费 1000 次/月） |
 | 本地 vLLM 接入 | ≥8GB 且算力≥7.0 的 GPU | 本机 GPU 不满足（见第五节） |
 
-联网搜索的代码路径已实现（`app/providers/websearch/base.py`），
-未配置 key 时自动降级为 `NullWebSearch`，不影响其他功能。
-配置后重启即可启用：
-
-```bash
-echo "TAVILY_API_KEY=tvly-你的key" >> .env
-docker compose restart backend
-python3 scripts/test_stream.py    # 提问时 enable_web=true 即可触发
-```
+联网搜索已于 2026-10-17 实测通过，见 2.7 节。
+联网搜索的代码路径在 `app/providers/websearch/base.py`；
+未配置 key 时自动降级为 `NullWebSearch`，不影响其他功能，
+健康检查会给出 warning 提示（见第四节缺陷 15）。
 
 ---
 
@@ -243,27 +262,111 @@ python3 scripts/test_stream.py    # 提问时 enable_web=true 即可触发
 | 15 | 联网搜索静默降级 | 没配 key 时"看着能用其实不能"，无任何提示 | 健康检查加 `warnings` + 启动 WARNING |
 | 16 | 容器以 root 运行 | 上传文件在宿主机归属 root，用户手动操作需 sudo | 镜像改用非 root 用户（UID/GID=1000） |
 
+### 2026-10-17 第三轮审查发现的缺陷
+
+本轮由 4 个并行审查分别覆盖 `app/api`、`app/services`、`app/providers`+`app/core`、`scripts`，
+逐条读代码确认后修复。修复后 46 项核心断言、端到端 26/26（`--keep` 保留数据）全部通过，
+检索仍为 5/5 命中，分块数与修复前一致。
+
+| # | 问题 | 影响 | 修复 |
+|---|---|---|---|
+| 17 | `split_text` 自然分隔符路径未应用 `chunk_overlap` | 只有无分隔符的硬切回退用了 overlap，普通文档的重叠配置完全不生效，跨块语义被切断 | 分块合并后统一拼接前块尾部，且不超过 `chunk_size` |
+| 18 | `chunk_overlap >= chunk_size` 时硬切步长 ≤ 0 | 等于时抛 `ValueError` 中断索引；大于时 `range()` 为空，整段内容被**静默丢弃**。两个参数均可由管理员在运行时改且无校验 | 入口夹取到 `[0, chunk_size // 2]` |
+| 19 | 文档解析在事件循环内同步执行 | 扫描件 OCR 逐页解析期间，整个 worker 停摆，并发问答与健康检查全部阻塞 | 改用 `asyncio.to_thread` |
+| 20 | 清理旧向量早于创建集合 | 集合缺失时 delete 先报错，`create_kb` 承诺的"首次上传时重试"永远走不到，文档再也无法索引 | 顺序调整为先 `ensure_collection` |
+| 21 | 精判结果直接 `bool()` | 模型返回字符串 `"false"`（非空串为真）被当成命中，跳过联网兜底 | 显式处理字符串真值 |
+| 22 | `/api/health` 每次都真实请求 LLM | 免鉴权接口 + 容器 HEALTHCHECK 每 30s 轮询 → 持续的计费调用；LLM 响应慢于健康检查 10s 超时时容器被误判 unhealthy | 探活结果缓存 5 分钟 |
+| 23 | 健康检查未把 Embedding 计入 status | Embedding 加载失败时 `status` 仍报 ok，实际检索已经不可用 | status 纳入 `dim > 0`，并补充 warning |
+| 24 | `get_embedding()` 调用在 try 之外 | 该 provider 配置不全时健康检查返回 500，违背"逐组件降级"契约 | 移入 try |
+| 25 | 审计 IP 取自不可控的 `X-Forwarded-For` 且不限长 | 超过 64 字符会撑爆 `ip_address` 列宽，审计记录被静默丢弃；记录内容本身也可伪造 | 取首跳并截断 64 字符 |
+| 26 | `PATCH /api/admin/users` 显式传 `null` | `status`/`role` 是 NOT NULL 列，置空触发 IntegrityError 500，且绕过"不能禁用自己"的保护 | 过滤显式 null 字段 |
+| 27 | 上传先整读入内存再校验大小 | 超大文件在被拒绝前已占满内存 | 改为有界读取 `read(max+1)` |
+| 28 | 删除知识库先删文件、后提交事务 | 提交失败则库记录还在、文件已被删光，不可恢复 | 先提交再清理磁盘 |
+| 29 | CORS `allow_origins=*` 与 `allow_credentials=True` 同开 | 任意站点可携带凭据跨域（本项目用 Bearer，影响有限） | 改为 `False` |
+| 30 | `test_stream.py` / `test_query_rewrite.py` 只打印不判定 | 功能失效时仍退出 0，无法作为回归测试使用 | 增加失败项收集与退出码 |
+| 31 | `start.sh` 读 .env 时缺 `\|\| true` | .env 无 `ADMIN_USERNAME` 时脚本在打印成功横幅后异常退出 1 | 补 `\|\| true` |
+| 32 | ragcli 流式请求绕过错误处理 | token 过期等场景直接抛裸 traceback，而非可读错误 | 统一错误转换并关闭响应 |
+| 33 | ragcli 部分上传失败仍返回 0 | 自动化无法感知失败 | 改为任一失败即返回 1 |
+| 34 | selfcheck 读文件无存在性检查 | 文件缺失时抛异常，丢失此前收集的全部诊断 | 加存在性判断与兜底 |
+
+### 2026-10-17 第四轮：架构级问题修复
+
+第三轮列出的四项「已知未修复」本轮全部处理完毕。
+
+| # | 问题 | 影响 | 修复 |
+|---|---|---|---|
+| 35 | 改密码 / 重置密码后旧 JWT 仍有效 | 没有 token 吊销机制，改密或管理员重置密码都无法让已签发的 token 立即失效（默认 1440 分钟内照样能用），与响应文案"请重新登录"不符。账号被盗后重置密码形同无效 | `users` 表新增 `token_version` 列，JWT 携带 `tv` 声明，登录时比对，不符即 401。改密、重置密码、改角色/状态时递增 |
+| 36 | 组件故障被静默降级为「无结果」 | Qdrant 检索异常被吞成空列表、Tavily 失败被吞成空列表，调用方无法区分"没有匹配"与"后端挂了"，基础设施故障表现为一句"知识库无相关内容" | 新增 `app/core/errors.py`；向量库 / Embedding / 联网搜索失败改为抛 `ProviderError` 子类并统一映射 503；联网搜索失败原因写入 `web_search_error` 字段 |
+| 37 | `QDRANT_VECTOR_SIZE` 是死配置 | 该字段从未被读取，集合维度实际取自 Embedding 实测输出；照文档改它没有任何效果，反而误导 | 从 `config.py` 与 `.env.example` 移除，文档改为"维度由模型自动探测" |
+| 38 | 非 1024 维的 API Embedding 会失败 | API Embedding 维度硬编码 1024，与真实输出不符时集合建错、写入被 Qdrant 拒绝，且没有配置项可改 | 新增 `EMBEDDING_API_DIM`（0 = 启动预热时自动探测）；`dimension` 未知时明确报错而非返回 1024；索引流程改为先向量化、用实测维度建集合 |
+| 39 | 同一故障返回两种状态码 | `/ask` 经 `except RuntimeError` 返回 503，`/retrieve` 却落到通用处理器返回 500 | 新增 `ProviderError` 专用异常处理器，统一 503 |
+
+**旧 token 兼容性**：`tv` 声明缺失按 0 处理，升级后此前签发的 token 在用户改密前仍然有效，
+不会因为这次改动把所有人踢下线。
+
+**集合维度防护**：集合已存在且维度与当前 Embedding 不符时，空集合直接重建
+（覆盖 `create_kb` 预建时维度未知的情况），已有数据则明确报错，
+绝不静默清空用户数据（第四节缺陷 20 的后续加固）。
+
+### 本轮实测验证
+
+| 验证项 | 方法 | 结果 |
+|---|---|---|
+| 启动期迁移补列 | `information_schema.columns` 查询 | `token_version\|integer\|0\|NO` ✓ |
+| 重置密码吊销旧 token | 建临时用户 → 登录 → 管理员重置密码 → 旧 token 调 `/me` | `token.tv=0` vs `DB=1` → **401 登录状态已失效** ✓ |
+| 禁用账户吊销 token | 禁用后再用其 token | 401 ✓，admin 自己的 token 不受影响 ✓ |
+| 故障与空结果可区分 | 停掉 Qdrant 后调 `/retrieve` 与 `/ask` | 正常空库 `200 hit_count=0` / 故障 **503** ✓，恢复后自动痊愈 ✓ |
+| 联网搜索失败不再静默 | 桩 provider 抛 `WebSearchError` 走 `_prepare` | `web_search_error` 有值 ✓；搜索成功但无结果时为空 ✓ |
+| 集合维度防护 | 空集合 / 非空集合分别用不同维度调 `ensure_collection` | 空集合自动重建 ✓；非空集合抛 `VectorStoreError` ✓ |
+| 非 1024 维处理 | `OpenAICompatEmbedding(dim=0).dimension` | 明确抛 `EmbeddingError` ✓ |
+| 移除死配置不破坏启动 | 服务在仍含 `QDRANT_VECTOR_SIZE` 的 .env 下启动 | 正常（`extra="ignore"`）✓ |
+
+回归结果：`verify_core` 46/46、`e2e_test --keep` 26/26、`test_stream` 流式通过、
+`test_query_rewrite` 全部符合预期。
+
+### 2026-10-17 第五轮：更换测试 fixture 暴露的缺陷
+
+测试 fixture 由 `白皮书.pdf`（1.7KB stub）与 `大型规章制度.md` 换成真实英文论文
+`DSR_protocol.pdf`（7.4MB UWB 测距论文，97 块）后，端到端测试暴露出两个此前审查遗漏的缺陷：
+
+| # | 问题 | 影响 | 修复 |
+|---|---|---|---|
+| 40 | PDF 提取文本含 NUL 字节（`\x00`） | PostgreSQL TEXT 按 UTF8 存储会拒绝 `0x00`，写分块时报 `CharacterNotInRepertoireError`，整条索引失败 | `normalize_text` 统一剥离 NUL 及其余无意义控制字符（保留 `\n`/`\t`） |
+| 41 | 索引失败处理器未先回滚 | 写库失败后事务处于 rolled back 状态，原 `commit()` 抛 `PendingRollbackError`，失败状态无法落库，文档永远停在 `indexing`，wait 轮询看不到 failed | except 块先 `rollback()` → 重取文档 → 置 failed → `commit()` → `raise` |
+
+回归结果：`selfcheck` 5/5、`verify_core` 46/46、`e2e_test` 25/25、`test_stream` 流式通过、
+`test_query_rewrite` 全部符合预期。
+
 ---
 
 ## 五、如何复现验证
 
 ```bash
-cd /home/p50/RAG-LAB
+cd /home/kkcjy/LLM/RAG-LAB
 
 # 轻量检查（秒级，零依赖）
 python3 scripts/selfcheck.py      # 静态结构，5 项检查
 python3 scripts/verify_core.py    # 核心逻辑，46 项断言
 
-# 端到端（需服务运行）
+# 端到端（需服务运行；未配 DEEPSEEK_API_KEY 时相关断言自动跳过）
 docker compose up -d                     # 生产模式
 # 或
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d   # 开发模式
 
-python3 scripts/e2e_test.py              # 24 项断言
-python3 scripts/e2e_test.py --keep       # 保留数据便于人工检查
+python3 scripts/e2e_test.py              # 27 项断言（含 LLM 时）
+python3 scripts/e2e_test.py --keep       # 保留数据便于人工检查（26 项，跳过清理断言）
+python3 scripts/test_stream.py           # SSE 流式问答
+python3 scripts/test_query_rewrite.py    # Query 改写与相关度判定
 ```
 
+> 后三个脚本在 2026-10-17 之前只打印结果、始终退出 0，功能失效也无法察觉；
+> 现已改为校验失败时收集问题并 `exit 1`，可直接用于 CI。
+
 测试文档位于 `test_fixtures/`，包含 PDF / Word / Markdown / TXT 四种格式。
+
+> 注：本机（WSL2 mirrored 网络模式）宿主机 8000 被 Windows 的残留 portproxy 规则占用，
+> 故 `docker-compose.yml` 将 backend 发布为 **18000**、redis 发布为 **16379**（容器内端口不变）。
+> 访问地址为 http://localhost:18000/docs。
 
 ---
 

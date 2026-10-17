@@ -64,6 +64,7 @@ async def ask(
         kb_hit=ctx.kb_hit,
         rewritten_query=ctx.rewritten_query or None,
         latency_ms=round(latency, 2),
+        web_search_error=ctx.web_search_error or None,
     )
 
 

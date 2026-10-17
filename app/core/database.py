@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from typing import AsyncIterator
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -41,15 +42,27 @@ async def get_db() -> AsyncIterator[AsyncSession]:
             raise
 
 
+# 已发布版本新增的列。
+# create_all 只建缺失的表、不会给已存在的表加列，所以新增列必须在这里补一次。
+# 每条都必须是幂等的（IF NOT EXISTS）：老库启动时补齐，新库由 create_all
+# 直接建好、此处是空操作。
+_MIGRATIONS = (
+    # 2026-10-17 token 版本号，用于改密码/改权限后立即吊销旧 JWT
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0",
+)
+
+
 async def init_db() -> None:
-    """建表。
+    """建表 + 补齐新增列。
 
     采用 create_all 直接建表（幂等，已存在则跳过）。
     requirements 里带了 alembic 但本项目暂未产出版本化迁移脚本，
-    如需演进表结构，请先生成 baseline 迁移再改用 upgrade。
+    新列通过 _MIGRATIONS 显式补齐。
     """
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        for sql in _MIGRATIONS:
+            await conn.execute(text(sql))
     logger.info("数据库表已就绪")
 
 

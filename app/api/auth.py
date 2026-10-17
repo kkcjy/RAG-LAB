@@ -43,7 +43,9 @@ async def login(
     await db.commit()
     await db.refresh(user)
 
-    token = create_access_token(subject=str(user.id), role=user.role)
+    token = create_access_token(
+        subject=str(user.id), role=user.role, token_version=user.token_version or 0
+    )
 
     await write_audit(
         db,
@@ -75,6 +77,8 @@ async def change_password(
         raise HTTPException(status_code=400, detail="原密码错误")
 
     user.password_hash = hash_password(payload.new_password)
+    # 递增 token 版本，使改密前签发的 token 立即失效（否则旧 token 还能用到过期）
+    user.token_version = (user.token_version or 0) + 1
     await db.commit()
 
     await write_audit(db, action="change_password", user_id=user.id, username=user.username)

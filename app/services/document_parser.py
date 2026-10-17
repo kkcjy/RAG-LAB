@@ -259,6 +259,10 @@ def normalize_text(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     # 全角空格 → 半角
     text = text.replace("\u3000", " ")
+    # PDF/OCR 提取文本常夹杂 NUL 字节（\x00），PostgreSQL 的 TEXT 列按 UTF8
+    # 编码存储会直接拒绝它，导致写分块时整条索引失败。顺带清掉其余无意义的
+    # 控制字符（保留 \n 与 \t）。
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
     # 压缩 3 个以上连续换行为 2 个（保留段落感）
     text = re.sub(r"\n{3,}", "\n\n", text)
     # 行内多余空格
@@ -280,6 +284,15 @@ def split_text(
     """
     if not text.strip():
         return []
+
+    # 参数防护：chunk_size / chunk_overlap 可由管理员在运行时通过
+    # PUT /api/admin/config 修改，且没有校验。overlap >= chunk_size 时硬切步长为
+    # 0（range 抛 ValueError）或负数（range 为空，整段内容被静默丢弃）。
+    # 上限取 chunk_size // 2：更大的 overlap 虽不再报错，但步长趋近 1，
+    # 会把一段文本切成大量近乎重复的碎块、撑爆索引。
+    if chunk_size <= 0:
+        chunk_size = 800
+    chunk_overlap = max(0, min(chunk_overlap, chunk_size // 2))
 
     separators = ["\n\n", "\n", "。", "！", "？", "；", ".", "!", "?", ";", "，", ",", " ", ""]
 
@@ -332,5 +345,21 @@ def split_text(
             merged[-1] = merged[-1] + "\n" + c
         else:
             merged.append(c)
+
+    # 应用 chunk_overlap：把前一块的尾部并入当前块开头，避免跨块语义被切断。
+    # 走自然分隔符路径时上面的递归切分并不会用到 overlap，只有无分隔符的硬切
+    # 回退才会用，所以此前配置的 chunk_overlap 对普通文档完全不生效。
+    # 拼接后仍不超过 chunk_size：空间不足时按剩余空间截取重叠长度。
+    if chunk_overlap > 0 and len(merged) > 1:
+        overlapped = [merged[0]]
+        for prev, cur in zip(merged, merged[1:]):
+            # -1 给拼接用的换行留位，保证整块仍不超过 chunk_size
+            room = chunk_size - len(cur) - 1
+            if room > 0:
+                tail = prev[-min(chunk_overlap, room):].strip()
+                if tail:
+                    cur = f"{tail}\n{cur}"
+            overlapped.append(cur)
+        merged = overlapped
 
     return merged

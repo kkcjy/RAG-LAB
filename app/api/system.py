@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from fastapi import APIRouter, Depends
 
@@ -18,6 +19,32 @@ router = APIRouter(prefix="/api", tags=["系统"])
 
 VERSION = "0.1.0"
 
+# /api/health 是免鉴权接口，且被容器 HEALTHCHECK 每 30s 轮询一次，而 LLM 探活
+# 会真实发起一次计费请求。不加缓存会产生持续的 API 花费，并且当 LLM 响应慢于
+# 健康检查的 10s 超时时，容器会被误判为 unhealthy。故缓存探活结果。
+_LLM_PROBE_TTL = 300.0
+_llm_probe_cache: tuple[float, bool, str] | None = None
+
+
+async def _probe_llm() -> tuple[bool, str]:
+    """探活 LLM（带 TTL 缓存），返回 (是否可用, 模型名或错误说明)。"""
+    global _llm_probe_cache
+    now = time.monotonic()
+    if _llm_probe_cache is not None and now - _llm_probe_cache[0] < _LLM_PROBE_TTL:
+        return _llm_probe_cache[1], _llm_probe_cache[2]
+
+    try:
+        llm = get_llm()
+        model = llm.model
+        ok = await llm.health_check()
+        result = (ok, model if ok else f"未就绪: {model} 探活失败")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("LLM 不可用: %s", e)
+        result = (False, f"未就绪: {e}")
+
+    _llm_probe_cache = (now, result[0], result[1])
+    return result
+
 
 @router.get("/health", response_model=HealthOut, summary="健康检查")
 async def health():
@@ -29,19 +56,10 @@ async def health():
     web_search_enabled 表示联网搜索是否真正可用（而非仅声明了 provider）。
     """
     llm_provider = settings.llm_provider
-    llm_model = ""
-    llm_ok = False
-    try:
-        llm = get_llm()
-        llm_model = llm.model
-        llm_ok = await llm.health_check()
-    except Exception as e:  # noqa: BLE001
-        logger.warning("LLM 不可用: %s", e)
-        llm_model = f"未就绪: {e}"
+    llm_ok, llm_model = await _probe_llm()
 
-    embedder = get_embedding()
     try:
-        dim = embedder.dimension
+        dim = get_embedding().dimension
     except Exception as e:  # noqa: BLE001
         logger.warning("Embedding 不可用: %s", e)
         dim = 0
@@ -70,9 +88,12 @@ async def health():
         )
     if not llm_ok:
         warnings.append("LLM 未就绪，无法生成回答（检索功能仍可用）")
+    if dim <= 0:
+        warnings.append("Embedding 不可用，无法向量化与检索")
 
-    # 向量库是问答的硬依赖；LLM 未配置时仍可做纯检索
-    status = "ok" if (llm_ok and store_ok) else ("degraded" if store_ok else "error")
+    # 向量库与 Embedding 都是问答的硬依赖；LLM 未配置时仍可做纯检索
+    ready = llm_ok and store_ok and dim > 0
+    status = "ok" if ready else ("degraded" if store_ok else "error")
 
     return HealthOut(
         status=status,

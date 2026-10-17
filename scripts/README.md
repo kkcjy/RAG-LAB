@@ -40,13 +40,13 @@
 
 ```bash
 # 交互式问答
-python3 scripts/ragcli.py --host http://服务器IP:8000
+python3 scripts/ragcli.py --host http://服务器IP:18000
 
 # 单次提问（适合脚本集成）
-python3 scripts/ragcli.py --host http://IP:8000 -u 用户名 -p 密码 --ask "年假多少天"
+python3 scripts/ragcli.py --host http://IP:18000 -u 用户名 -p 密码 --ask "年假多少天"
 
 # 检查服务状态（无需登录）
-python3 scripts/ragcli.py --host http://IP:8000 --health
+python3 scripts/ragcli.py --host http://IP:18000 --health
 ```
 
 **管理知识库/用户**（建库、上传文档、授权、统计等）看 `--help`：

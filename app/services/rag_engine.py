@@ -19,6 +19,7 @@ from typing import Any, AsyncIterator, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.errors import EmbeddingError, WebSearchError
 from app.models.db import KnowledgeBase
 from app.providers.embedding.base import get_embedding
 from app.providers.llm.base import BaseLLM, ChatMessage, get_llm, get_llm
@@ -79,6 +80,9 @@ class RAGContext:
     judge_reason: str = ""
     kb_hit_debug: bool = False
     rewritten_queries: list[str] = field(default_factory=list)
+    # 联网搜索失败原因。非空表示"搜过但失败了"，
+    # 与"搜到了但没结果"（都为空）区分开
+    web_search_error: str = ""
 
     def sources(self) -> list[dict]:
         out = [c.to_source() for c in self.chunks]
@@ -242,8 +246,9 @@ class RAGEngine:
             try:
                 vec = await self.embedder.embed_query(q)
             except Exception as e:  # noqa: BLE001
-                logger.error("查询向量化失败: %s", e)
-                continue
+                # 不再 continue 跳过：Embedding 挂了就一条都检索不到，
+                # 静默跳过会让故障表现为"知识库无相关内容"
+                raise EmbeddingError(f"查询向量化失败：{e}") from e
 
             hits: list[SearchHit] = await self.store.search(
                 collection=kb.collection_name,
@@ -313,7 +318,13 @@ class RAGEngine:
             match = re.search(r"\{.*\}", text, re.DOTALL)
             if match:
                 data = json.loads(match.group(0))
-                relevant = bool(data.get("relevant", False))
+                # 不能直接 bool()：部分模型会返回字符串 "false"，非空字符串恒为真，
+                # 会把不相关内容判成命中并跳过联网兜底
+                raw_relevant = data.get("relevant", False)
+                if isinstance(raw_relevant, str):
+                    relevant = raw_relevant.strip().lower() in ("true", "yes", "1", "是", "相关")
+                else:
+                    relevant = bool(raw_relevant)
                 reason = str(data.get("reason", ""))[:200]
                 return relevant, reason or ("LLM 判定相关" if relevant else "LLM 判定不相关")
             # 解析失败，保守放行（已有阈值兜底）
@@ -431,6 +442,7 @@ class RAGEngine:
                 "used_web_search": ctx.used_web_search,
                 "chunk_count": len(ctx.chunks),
                 "web_count": len(ctx.web_results),
+                "web_search_error": ctx.web_search_error or None,
             },
         }
 
@@ -472,8 +484,14 @@ class RAGEngine:
                 web = await self.search_web(search_query)
                 ctx.web_results = web
                 ctx.used_web_search = bool(web)
-            except Exception as e:  # noqa: BLE001
+            except WebSearchError as e:
+                # 记录原因而不是只打日志：否则调用方只看到"没有来源"，
+                # 无法分辨是搜不到还是搜索服务挂了
+                ctx.web_search_error = str(e)
                 logger.error("联网搜索失败: %s", e)
+            except Exception as e:  # noqa: BLE001
+                ctx.web_search_error = f"联网搜索失败：{e}"
+                logger.exception("联网搜索异常")
 
         return ctx
 

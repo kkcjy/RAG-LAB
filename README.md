@@ -58,7 +58,7 @@
 └────────────────────────┬─────────────────────────────────┘
                          │ HTTP / SSE
 ┌────────────────────────▼─────────────────────────────────┐
-│                    FastAPI 后端 :8000                     │
+│                   FastAPI 后端 :18000                     │
 │  /api/auth   登录、当前用户、改密码                         │
 │  /api/admin  用户管理、系统配置、审计日志、统计               │
 │  /api/kb     知识库 CRUD、权限、文档上传、索引               │
@@ -131,7 +131,7 @@ python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 python3 scripts/ragcli.py --health
 
 # 查看 API 文档
-# 浏览器打开 http://localhost:8000/docs
+# 浏览器打开 http://localhost:18000/docs
 ```
 
 **4. 登录**
@@ -230,7 +230,7 @@ CPU 推理约 1 秒/页，无需 GPU、无需联网、无需外部服务。
 
 ## API 文档
 
-服务启动后访问 `http://localhost:8000/docs` 查看交互式文档（Swagger UI）。
+服务启动后访问 `http://localhost:18000/docs` 查看交互式文档（Swagger UI）。
 
 ### 主要接口
 
@@ -285,24 +285,24 @@ CPU 推理约 1 秒/页，无需 GPU、无需联网、无需外部服务。
 
 ```bash
 # 登录
-TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login \
+TOKEN=$(curl -s -X POST http://localhost:18000/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"admin123456"}' \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 
 # 创建知识库
-curl -s -X POST http://localhost:8000/api/kb \
+curl -s -X POST http://localhost:18000/api/kb \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name":"公司制度","description":"员工手册与规章制度"}'
 
 # 上传文档
-curl -s -X POST http://localhost:8000/api/kb/<KB_ID>/documents \
+curl -s -X POST http://localhost:18000/api/kb/<KB_ID>/documents \
   -H "Authorization: Bearer $TOKEN" \
   -F "file=@员工手册.pdf"
 
 # 提问
-curl -s -X POST http://localhost:8000/api/chat/ask \
+curl -s -X POST http://localhost:18000/api/chat/ask \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"query":"年假有多少天","kb_id":"<KB_ID>"}'
@@ -318,17 +318,17 @@ curl -s -X POST http://localhost:8000/api/chat/ask \
 
 ```bash
 # 交互式问答（推荐）
-python3 scripts/ragcli.py --host http://服务器IP:8000
+python3 scripts/ragcli.py --host http://服务器IP:18000
 
 # 指定账号免输入
-python3 scripts/ragcli.py --host http://服务器IP:8000 -u zhangsan -p 密码
+python3 scripts/ragcli.py --host http://服务器IP:18000 -u zhangsan -p 密码
 
 # 单次提问（适合脚本集成）
-python3 scripts/ragcli.py --host http://服务器IP:8000 \
+python3 scripts/ragcli.py --host http://服务器IP:18000 \
   -u zhangsan -p 密码 --ask "报销流程是什么"
 
 # 检查服务状态
-python3 scripts/ragcli.py --host http://服务器IP:8000 --health
+python3 scripts/ragcli.py --host http://服务器IP:18000 --health
 ```
 
 ### 交互模式命令
@@ -347,14 +347,14 @@ python3 scripts/ragcli.py --host http://服务器IP:8000 --health
 
 ```bash
 # 列出所有用户
-python3 scripts/ragcli.py --host http://IP:8000 -u admin -p 密码 --list-users
+python3 scripts/ragcli.py --host http://IP:18000 -u admin -p 密码 --list-users
 
 # 创建用户
-python3 scripts/ragcli.py --host http://IP:8000 -u admin -p 密码 \
+python3 scripts/ragcli.py --host http://IP:18000 -u admin -p 密码 \
   --create-user lisi 密码123
 
 # 系统统计
-python3 scripts/ragcli.py --host http://IP:8000 -u admin -p 密码 --stats
+python3 scripts/ragcli.py --host http://IP:18000 -u admin -p 密码 --stats
 ```
 
 ### 分发给朋友
@@ -362,7 +362,7 @@ python3 scripts/ragcli.py --host http://IP:8000 -u admin -p 密码 --stats
 把 `scripts/ragcli.py` 单个文件发给他们即可，只要有 Python 3.8+ 就能运行：
 
 ```bash
-python3 ragcli.py --host http://你的公网IP:8000
+python3 ragcli.py --host http://你的公网IP:18000
 ```
 
 ---
@@ -575,14 +575,14 @@ docker exec rag-lab-backend curl -s -o /dev/null -w "%{http_code}\n" https://hf-
 
 ### 健康检查显示 degraded 而不是 ok
 
-`degraded` 是**正常的降级状态**，不是故障。它表示向量库正常、但 LLM 未就绪：
+`degraded` 是**正常的降级状态**，不是故障。它表示向量库正常、但 LLM 或 Embedding 未就绪：
 
 ```bash
-curl -s localhost:8000/api/health | python3 -m json.tool
+curl -s localhost:18000/api/health | python3 -m json.tool
 ```
 
 ```
-status: degraded          ← 向量库OK，LLM未配置
+status: degraded          ← 向量库OK，LLM或Embedding未就绪
 llm_model: "未就绪: ..."   ← 具体原因会写在里面
 embedding_dim: 1024        ← 模型已加载
 vector_store_ok: true
@@ -600,7 +600,7 @@ warnings: ["联网搜索已启用兜底(WEB_SEARCH_AUTO_FALLBACK=true)但 provid
 **重要**：LLM 未配置时，检索链路仍然完全可用。你可以用纯检索接口验证知识库：
 
 ```bash
-curl -X POST localhost:8000/api/chat/retrieve \
+curl -X POST localhost:18000/api/chat/retrieve \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"query":"年假有多少天","kb_id":"<KB_ID>"}'
@@ -641,7 +641,7 @@ curl -X DELETE localhost:6333/collections/<collection_name>
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
-  http://localhost:8000/api/kb/<KB_ID>/documents | python3 -m json.tool
+  http://localhost:18000/api/kb/<KB_ID>/documents | python3 -m json.tool
 ```
 
 `error_message` 字段会说明原因。常见情况：
@@ -658,7 +658,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 ```bash
 # 1. 查看分块是否正常
 curl -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:8000/api/kb/<KB_ID>/documents/<DOC_ID>/chunks"
+  "http://localhost:18000/api/kb/<KB_ID>/documents/<DOC_ID>/chunks"
 
 # 2. 降低阈值试试（admin 后台或直接改 .env）
 RETRIEVAL_SCORE_THRESHOLD=0.35
@@ -700,12 +700,12 @@ BGE_NUM_THREADS=2
 
 ### 如何让朋友访问
 
-1. 服务器防火墙开放 8000 端口
+1. 服务器防火墙开放 18000 端口
 2. 把 `ragcli.py` 发给朋友
-3. 朋友执行：`python3 ragcli.py --host http://你的公网IP:8000`
+3. 朋友执行：`python3 ragcli.py --host http://你的公网IP:18000`
 
 **生产建议**：前置 Nginx 配置 HTTPS，用域名而非裸 IP。
-直接暴露 8000 端口到公网时务必修改所有默认密码和 `SECRET_KEY`。
+直接暴露 18000 端口到公网时务必修改所有默认密码和 `SECRET_KEY`。
 
 ---
 

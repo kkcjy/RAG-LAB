@@ -56,7 +56,7 @@ fi
 # 6) 等待就绪
 echo -e "${YELLOW}等待服务就绪...${NC}"
 for i in $(seq 1 40); do
-    if curl -fsS http://localhost:8000/api/health >/dev/null 2>&1; then
+    if curl -fsS http://localhost:18000/api/health >/dev/null 2>&1; then
         echo -e "${GREEN}✓ 服务已就绪${NC}"
         break
     fi
@@ -70,12 +70,12 @@ done
 echo ""
 docker compose ps
 echo ""
-echo -e "${GREEN}API 文档:  http://localhost:8000/docs${NC}"
-echo -e "${GREEN}健康检查:  http://localhost:8000/api/health${NC}"
+echo -e "${GREEN}API 文档:  http://localhost:18000/docs${NC}"
+echo -e "${GREEN}健康检查:  http://localhost:18000/api/health${NC}"
 
 # 从 .env 读实际的管理员账号（不要写死，改过密码就误导）
-ADMIN_USER=$(grep -E '^ADMIN_USERNAME=' .env | head -1 | cut -d'=' -f2-)
-ADMIN_PWD=$(grep -E '^ADMIN_PASSWORD=' .env | head -1 | cut -d'=' -f2-)
+ADMIN_USER=$(grep -E '^ADMIN_USERNAME=' .env | head -1 | cut -d'=' -f2- || true)
+ADMIN_PWD=$(grep -E '^ADMIN_PASSWORD=' .env | head -1 | cut -d'=' -f2- || true)
 if [ -n "$ADMIN_USER" ]; then
     echo -e "${GREEN}默认管理员: ${ADMIN_USER} / ${ADMIN_PWD}${NC}  ${DIM}(来自 .env，仅首次启动创建时生效)${NC}"
     echo -e "${DIM}  若已改过密码，此提示不再有效${NC}"

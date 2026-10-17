@@ -13,7 +13,7 @@ import time
 import urllib.request
 import urllib.error
 
-HOST = "http://localhost:8000"
+HOST = "http://localhost:18000"
 
 
 def api(method, path, body=None, token=None) -> dict:
@@ -124,7 +124,17 @@ print(f"事件序列   : {' → '.join(events)}")
 print(f"回答长度   : {len(answer)} 字符")
 print(f"delta 事件 : {len(delta_times)} 次")
 
-if first_delta_latency:
+failures: list[str] = []
+if not delta_times:
+    failures.append("未收到任何 delta 事件")
+if "sources" not in events:
+    failures.append("缺少 sources 事件")
+if "done" not in events:
+    failures.append("缺少 done 事件")
+if not answer.strip():
+    failures.append("回答内容为空")
+
+if first_delta_latency is not None:
     print(f"首字节延迟 : {first_delta_latency:.2f}s")
     if len(delta_times) > 1:
         span = delta_times[-1] - delta_times[0]
@@ -133,9 +143,22 @@ if first_delta_latency:
         spread = len(set(round(t, 1) for t in delta_times))
         print(f"时间分布   : 跨越 {spread} 个 0.1s 时间片 "
               f"{'→ 真流式 ✓' if spread > 3 else '→ 疑似一次性返回 ✗'}")
+        if spread <= 3:
+            failures.append(f"delta 仅跨越 {spread} 个时间片，疑似一次性返回而非真流式")
+else:
+    failures.append("未收到首字节延迟数据（无 delta）")
 
 print()
 print("=" * 62)
 print("完整回答")
 print("=" * 62)
 print(answer)
+
+print()
+if failures:
+    print(f"✗ 流式验证失败（{len(failures)} 项）:")
+    for f in failures:
+        print(f"    - {f}")
+    sys.exit(1)
+print("✓ 流式验证通过")
+sys.exit(0)

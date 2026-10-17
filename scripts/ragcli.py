@@ -7,10 +7,10 @@ RAG-LAB 终端客户端
 
 用法:
     # 交互式问答（最常用）
-    python3 scripts/ragcli.py --host http://1.2.3.4:8000
+    python3 scripts/ragcli.py --host http://1.2.3.4:18000
 
     # 单次提问
-    python3 scripts/ragcli.py --host http://1.2.3.4:8000 -u user1 -p pass --ask "报销流程是什么"
+    python3 scripts/ragcli.py --host http://1.2.3.4:18000 -u user1 -p pass --ask "报销流程是什么"
 
     # 管理知识库/用户（建库、上传文档、授权等）
     python3 scripts/ragcli.py --help
@@ -50,11 +50,12 @@ class APIClient:
         if self.token:
             req.add_header("Authorization", f"Bearer {self.token}")
 
-        if stream:
-            return urllib.request.urlopen(req, timeout=300)
-
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            resp = urllib.request.urlopen(req, timeout=300 if stream else 120)
+            if stream:
+                # 交给调用方逐行读取并负责关闭
+                return resp
+            with resp:
                 raw = resp.read().decode()
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as e:
@@ -168,14 +169,15 @@ class APIClient:
         if session_id:
             body["session_id"] = session_id
         resp = self._request("POST", "/api/chat/stream", body, stream=True)
-        for raw_line in resp:
-            line = raw_line.decode(errors="ignore").strip()
-            if not line.startswith("data:"):
-                continue
-            try:
-                yield json.loads(line[5:].strip())
-            except json.JSONDecodeError:
-                continue
+        with resp:
+            for raw_line in resp:
+                line = raw_line.decode(errors="ignore").strip()
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    yield json.loads(line[5:].strip())
+                except json.JSONDecodeError:
+                    continue
 
     # ---------------- 管理 ----------------
     def list_users(self) -> dict:
@@ -516,7 +518,7 @@ def interactive(client: APIClient, user: dict, kb_id: str | None, kb_name: str) 
 # ---------------------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser(description="RAG-LAB 终端客户端")
-    ap.add_argument("--host", default="http://localhost:8000", help="服务地址")
+    ap.add_argument("--host", default="http://localhost:18000", help="服务地址")
     ap.add_argument("-u", "--user", help="用户名")
     ap.add_argument("-p", "--password", help="密码")
     ap.add_argument("--kb", help="知识库名称或ID，启动时直接选择")
@@ -710,7 +712,7 @@ def main() -> int:
                         fail += 1
                 if ok:
                     print(f"{YELLOW}  索引为异步执行，用 --wait 等待完成后再提问{NC}")
-                return 1 if fail and not ok else 0
+                return 1 if fail else 0
 
             if args.wait:
                 return _wait_for_index(client, kb["id"], kb["name"])

@@ -2,6 +2,7 @@
 #   另含：删除时的向量/空目录清理、进程重启后的未完成索引补偿
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import hashlib
 import logging
@@ -52,7 +53,9 @@ async def index_document(db: AsyncSession, doc_id: uuid.UUID) -> dict:
 
     try:
         # 2) 解析
-        parsed = parse_document(doc.stored_path)
+        # parse_document 是同步且 CPU 密集的（PDF/Word 解析，扫描件还要跑一遍
+        # OCR），直接调用会卡住整个事件循环，让并发的 SSE 问答与 /health 全部停摆。
+        parsed = await asyncio.to_thread(parse_document, doc.stored_path)
         if not parsed.text.strip():
             parser_used = (parsed.meta or {}).get("parser", "")
             if parser_used == "ocr_failed":
@@ -98,16 +101,18 @@ async def index_document(db: AsyncSession, doc_id: uuid.UUID) -> dict:
         doc.chunk_count = len(chunks)
         await db.commit()
 
-        # 4) 清掉旧数据（幂等重建）
+        # 4) 先向量化：用实测维度建集合，避免配置维度与实际不符导致写入被拒
+        vectors = await embedder.embed_documents(chunks)
+        actual_dim = len(vectors[0]) if vectors else embedder.dimension
+
+        # 5) 确保集合存在（必须早于清理旧数据：集合不存在时 purge 会直接报错，
+        #    导致 "首次上传时重试" 的兜底永远走不到 ensure_collection）
+        await store.ensure_collection(kb.collection_name, actual_dim)
+
+        # 6) 清掉旧数据（幂等重建）
         await _purge_document_vectors(db, doc.id, kb.collection_name)
 
-        # 5) 向量化
-        embedder_dim = embedder.dimension
-        await store.ensure_collection(kb.collection_name, embedder_dim)
-
-        vectors = await embedder.embed_documents(chunks)
-
-        # 6) 构造向量记录 + 关系库分块记录
+        # 7) 构造向量记录 + 关系库分块记录
         records: list[VectorRecord] = []
         chunk_rows: list[Chunk] = []
 
@@ -134,17 +139,17 @@ async def index_document(db: AsyncSession, doc_id: uuid.UUID) -> dict:
                 )
             )
 
-        # 7) 写向量库
+        # 8) 写向量库
         await store.upsert(kb.collection_name, records)
 
-        # 8) 写关系库
+        # 9) 写关系库
         db.add_all(chunk_rows)
 
         doc.status = "ready"
         doc.indexed_at = dt.datetime.now(dt.timezone.utc)
         await db.flush()
 
-        # 9) 更新知识库统计
+        # 10) 更新知识库统计
         await _refresh_kb_stats(db, kb.id)
         await db.commit()
 
@@ -153,9 +158,15 @@ async def index_document(db: AsyncSession, doc_id: uuid.UUID) -> dict:
 
     except Exception as e:  # noqa: BLE001
         logger.exception("文档索引失败: %s", doc.filename)
-        doc.status = "failed"
-        doc.error_message = str(e)[:1000]
-        await db.commit()
+        # 写库失败（如内容含非法字节）时事务已处于 rolled back 状态，直接 commit
+        # 会抛 PendingRollbackError，导致文档永远停在 indexing。先回滚再重取，
+        # 才能把失败状态落库、让 wait 轮询与重试兜底看到它。
+        await db.rollback()
+        failed_doc = await db.get(Document, doc_id)
+        if failed_doc is not None:
+            failed_doc.status = "failed"
+            failed_doc.error_message = str(e)[:1000]
+            await db.commit()
         raise
 
 

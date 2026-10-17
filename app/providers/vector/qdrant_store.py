@@ -6,6 +6,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from app.core.config import settings
+from app.core.errors import VectorStoreError
 from app.providers.vector.base import BaseVectorStore, SearchHit, VectorRecord
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,11 @@ class QdrantVectorStore(BaseVectorStore):
             await client.delete_collection(name)
             exists = False
 
+        if exists:
+            await self._guard_dim_mismatch(name, dim)
+            # 维度不符且集合为空时会重建，需重新确认存在性
+            exists = await client.collection_exists(name)
+
         if not exists:
             await client.create_collection(
                 collection_name=name,
@@ -77,6 +83,44 @@ class QdrantVectorStore(BaseVectorStore):
                     )
                 except Exception as e:  # noqa: BLE001
                     logger.debug("为 %s.%s 建索引失败（可忽略）: %s", name, field_name, e)
+
+    async def _guard_dim_mismatch(self, name: str, dim: int) -> None:
+        """集合维度与当前 Embedding 维度不一致时提前处理。
+
+        维度不符时 upsert 会被 Qdrant 拒绝，但报错信息晦涩难定位。这里提前判断：
+        空集合直接重建（无数据可丢，覆盖 create_kb 预建时维度未知的情况）；
+        已有数据则明确报错，绝不静默清空用户数据。
+        """
+        client = self._get_client()
+        try:
+            info = await client.get_collection(name)
+            params = info.config.params.vectors
+            current = getattr(params, "size", None)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("读取集合 %s 维度失败（跳过校验）: %s", name, e)
+            return
+
+        if current is None or int(current) == int(dim):
+            return
+
+        try:
+            count = int((await client.count(collection_name=name, exact=True)).count)
+        except Exception:  # noqa: BLE001
+            count = -1
+
+        if count == 0:
+            logger.warning(
+                "集合 %s 维度为 %s，与当前 Embedding 维度 %d 不一致；集合为空，直接重建",
+                name, current, dim,
+            )
+            await client.delete_collection(name)
+            return
+
+        raise VectorStoreError(
+            f"集合 {name} 已有 {count} 条向量，其余维度 {current} 与当前 Embedding "
+            f"维度 {dim} 不一致，写入会被拒绝。请恢复原 Embedding 配置，"
+            f"或删除该知识库后重建并重新索引。"
+        )
 
     async def upsert(self, collection: str, records: List[VectorRecord]) -> int:
         from qdrant_client.models import PointStruct
@@ -127,8 +171,9 @@ class QdrantVectorStore(BaseVectorStore):
             )
             points = result.points
         except Exception as e:  # noqa: BLE001
-            logger.error("Qdrant 检索失败: %s", e)
-            return []
+            # 不返回空列表：否则调用方无法区分「没有匹配」与「向量库挂了」，
+            # 基础设施故障会被静默降级成一句"知识库无相关内容"
+            raise VectorStoreError(f"向量库检索失败：{e}（集合 {collection}）") from e
 
         return [
             SearchHit(id=str(p.id), score=float(p.score), payload=p.payload or {})

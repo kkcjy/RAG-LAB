@@ -169,6 +169,8 @@ class AskResponse(BaseModel):
     kb_hit: bool = False
     rewritten_query: Optional[str] = None
     latency_ms: float = 0.0
+    # 联网搜索失败原因；非空表示"搜过但失败了"，与"没有结果"区分开
+    web_search_error: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

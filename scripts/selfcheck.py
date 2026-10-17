@@ -105,6 +105,9 @@ for rel, fns in expect_factories.items():
 # 旧位置不应再有工厂
 for rel in ["app/providers/llm/openai_compat.py", "app/providers/vector/qdrant_store.py"]:
     fp = ROOT / rel
+    if not fp.exists():
+        errors.append(f"缺少文件 {rel}")
+        continue
     src = fp.read_text(encoding="utf-8")
     tree = ast.parse(src)
     defined = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
@@ -119,7 +122,16 @@ abstract_specs = [
     ("app/providers/vector/base.py", "BaseVectorStore", "app/providers/vector/qdrant_store.py", "QdrantVectorStore"),
 ]
 for abs_rel, abs_cls, impl_rel, impl_cls in abstract_specs:
-    abs_tree = ast.parse((ROOT / abs_rel).read_text(encoding="utf-8"))
+    abs_fp = ROOT / abs_rel
+    impl_fp = ROOT / impl_rel
+    if not abs_fp.exists():
+        errors.append(f"缺少文件 {abs_rel}")
+        continue
+    if not impl_fp.exists():
+        errors.append(f"缺少文件 {impl_rel}")
+        continue
+
+    abs_tree = ast.parse(abs_fp.read_text(encoding="utf-8"))
     abstract_methods = set()
     for node in ast.walk(abs_tree):
         if isinstance(node, ast.ClassDef) and node.name == abs_cls:
@@ -132,13 +144,18 @@ for abs_rel, abs_cls, impl_rel, impl_cls in abstract_specs:
                     ):
                         abstract_methods.add(item.name)
 
-    impl_tree = ast.parse((ROOT / impl_rel).read_text(encoding="utf-8"))
+    impl_tree = ast.parse(impl_fp.read_text(encoding="utf-8"))
     impl_methods = set()
     for node in ast.walk(impl_tree):
         if isinstance(node, ast.ClassDef) and node.name == impl_cls:
             for item in node.body:
                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     impl_methods.add(item.name)
+
+    # 抽象类改名/删除时 abstract_methods 会为空，下面的差集恒为空、
+    # 检查静默失效，所以这里显式兜底
+    if not abstract_methods:
+        errors.append(f"{abs_rel} 中未找到 {abs_cls} 的抽象方法（类名可能已改）")
 
     missing = abstract_methods - impl_methods
     if missing:
@@ -184,7 +201,8 @@ _EXTERNAL_ENV_KEYS = {
     "no_proxy", "http_proxy", "https_proxy",
     "tz",
 }
-env_src = (ROOT / ".env.example").read_text(encoding="utf-8")
+env_path = ROOT / ".env.example"
+env_src = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
 env_keys = {
     line.split("=", 1)[0].strip().lower()
     for line in env_src.splitlines()
@@ -199,13 +217,14 @@ for node in ast.walk(cfg_tree):
             if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
                 cfg_fields.add(item.target.id)
 
-missing_in_cfg = env_keys - cfg_fields - _EXTERNAL_ENV_KEYS
-missing_in_env = cfg_fields - env_keys
+if env_src:
+    missing_in_cfg = env_keys - cfg_fields - _EXTERNAL_ENV_KEYS
+    missing_in_env = cfg_fields - env_keys
 
-if missing_in_cfg:
-    warnings.append(f".env.example 中这些键在 config.py 里没有对应字段: {sorted(missing_in_cfg)}")
-if missing_in_env:
-    warnings.append(f"config.py 中这些字段未出现在 .env.example: {sorted(missing_in_env)}")
+    if missing_in_cfg:
+        warnings.append(f".env.example 中这些键在 config.py 里没有对应字段: {sorted(missing_in_cfg)}")
+    if missing_in_env:
+        warnings.append(f"config.py 中这些字段未出现在 .env.example: {sorted(missing_in_env)}")
 
 # ---------------------------------------------------------------------------
 print()

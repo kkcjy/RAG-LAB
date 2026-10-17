@@ -35,7 +35,6 @@ class Settings(BaseSettings):
     qdrant_port: int = 6333
     qdrant_grpc_port: int = 6334
     qdrant_api_key: Optional[str] = None
-    qdrant_vector_size: int = 1024
 
     # ---------- Redis ----------
     redis_host: str = "localhost"
@@ -71,6 +70,9 @@ class Settings(BaseSettings):
     embedding_api_key: Optional[str] = None
     embedding_api_base_url: Optional[str] = None
     embedding_api_model: Optional[str] = None
+    # API Embedding 的向量维度。0 = 启动预热时自动探测（推荐）。
+    # 集合维度实际取自 Embedding 实测输出，此值仅用于探测前提前建集合。
+    embedding_api_dim: int = 0
 
     # ---------- 检索 ----------
     retrieval_score_threshold: float = 0.50

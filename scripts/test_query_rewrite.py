@@ -12,7 +12,7 @@ import sys
 import urllib.request
 import urllib.error
 
-HOST = "http://localhost:8000"
+HOST = "http://localhost:18000"
 
 
 def api(method, path, body=None, token=None) -> dict:
@@ -101,6 +101,8 @@ print("=" * 74)
 print("Query 改写 与 相关度判定 验证")
 print("=" * 74)
 
+failures: list[str] = []
+
 for name, q, expect_hit in cases:
     r = api("POST", "/api/chat/retrieve", {"query": q, "kb_id": kb_id}, token)
     print(f"\n【{name}】")
@@ -108,6 +110,7 @@ for name, q, expect_hit in cases:
 
     if "_error" in r:
         print(f"  错误      : {r['_error']} {r['_detail'][:120]}")
+        failures.append(f"{name}: 请求失败 {r['_error']}")
         continue
 
     rq = r.get("rewritten_queries", [])
@@ -123,6 +126,14 @@ for name, q, expect_hit in cases:
     if expect_hit is not None:
         ok = r.get("kb_hit") == expect_hit
         print(f"  预期      : kb_hit={expect_hit}  {'✓ 符合' if ok else '✗ 不符'}")
+        if not ok:
+            failures.append(
+                f"{name}: 期望 kb_hit={expect_hit}，实际 {r.get('kb_hit')}"
+            )
+
+    if not rq:
+        print("  (未返回改写结果)")
+        failures.append(f"{name}: 未返回 rewritten_queries")
 
 # 若本次自动建了临时库，用完即删，避免污染数据
 if _auto_created:
@@ -131,3 +142,10 @@ if _auto_created:
 
 print()
 print("=" * 74)
+if failures:
+    print(f"✗ 验证失败（{len(failures)} 项）:")
+    for f in failures:
+        print(f"    - {f}")
+    sys.exit(1)
+print("✓ Query 改写与相关度判定 全部符合预期")
+sys.exit(0)

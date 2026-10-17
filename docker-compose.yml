@@ -18,7 +18,10 @@ services:
     env_file:
       - .env
     ports:
-      - "8000:8000"
+      # 宿主机的 8000 常被其他服务占用（本机即被一条残留的 netsh portproxy 规则占着），
+      # 改发布到 18000，避免与宿主机既有服务抢常用端口。
+      # 容器内仍是 8000（APP_PORT），仅外部访问地址变为 http://localhost:18000
+      - "18000:8000"
     volumes:
       - ./data/uploads:/app/data/uploads
       - ./data/logs:/app/data/logs
@@ -95,7 +98,11 @@ services:
     volumes:
       - redis_data:/data
     ports:
-      - "6379:6379"
+      # 宿主机 6379 已被本机既有的 Redis 服务占用（WSL2 mirrored 网络模式下
+      # 与容器直接冲突，导致端口绑定失败）。改发布到 16379。
+      # 容器内仍是 6379，后端经 compose 内部网络以 redis:6379 连接，不受影响；
+      # 仅从宿主机用 redis-cli 调试时需改用 16379。
+      - "16379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s

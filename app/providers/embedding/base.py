@@ -7,6 +7,7 @@ import logging
 from typing import List, Optional
 
 from app.core.config import settings
+from app.core.errors import EmbeddingError
 
 logger = logging.getLogger(__name__)
 
@@ -145,16 +146,39 @@ class OpenAICompatEmbedding(BaseEmbedding):
         model: str,
         api_key: Optional[str],
         base_url: str,
-        dim: int = 1024,
+        dim: int = 0,
     ):
         self.model = model
         self.api_key = api_key or "not-needed"
         self.base_url = base_url.rstrip("/")
+        # 0 表示维度未知，启动预热时探测（见 warmup）
         self._dim = dim
 
     @property
     def dimension(self) -> int:
-        return self._dim
+        if self._dim:
+            return self._dim
+        raise EmbeddingError(
+            f"Embedding 维度未知（模型 {self.model}）。"
+            f"请在 .env 设置 EMBEDDING_API_DIM，"
+            f"或先成功调用一次 embed_documents 让系统自动探测。"
+        )
+
+    async def warmup(self) -> bool:
+        """探测真实维度。
+
+        建集合需要知道维度，而 API Embedding 的维度只有响应才知道——
+        此前这里硬编码 1024，维度不符时集合建错、写入被 Qdrant 拒绝。
+        """
+        if self._dim:
+            return True
+        try:
+            await self.embed_query("维度探测")
+            logger.info("Embedding API 维度探测完成: dim=%d", self._dim)
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Embedding API 维度探测失败（首次使用时重试）: %s", e)
+            return False
 
     def _headers(self) -> dict:
         return {
@@ -219,6 +243,7 @@ def get_embedding() -> BaseEmbedding:
             model=settings.embedding_api_model or "BAAI/bge-m3",
             api_key=settings.embedding_api_key,
             base_url=settings.embedding_api_base_url,
+            dim=settings.embedding_api_dim,
         )
     else:
         raise ValueError(f"未知的 EMBEDDING_PROVIDER: {provider}")

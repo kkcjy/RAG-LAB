@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from app.api import admin, auth, chat, kb, system  # noqa: F401
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal, close_db, init_db
+from app.core.errors import ProviderError
 
 # ---------------------------------------------------------------------------
 # 日志
@@ -146,7 +147,9 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    # 鉴权走 Bearer token 而非 Cookie，无需放行凭据；
+    # 与 allow_origins=["*"] 同开会让任意站点携带凭据跨域访问。
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -155,6 +158,17 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # 全局异常处理
 # ---------------------------------------------------------------------------
+@app.exception_handler(ProviderError)
+async def provider_error_handler(request: Request, exc: ProviderError):
+    """向量库 / Embedding / 联网搜索不可用。
+
+    这类故障此前被 provider 吞成空结果，表现为"知识库无相关内容"，
+    调用方无从分辨。统一返回 503，与"检索成功但没命中"区分开。
+    """
+    logger.error("依赖组件不可用: %s %s - %s", request.method, request.url.path, exc)
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     logger.exception("未处理异常: %s %s", request.method, request.url.path)

@@ -47,6 +47,11 @@ class User(Base):
     # active | disabled
     status: Mapped[str] = mapped_column(String(16), default="active", nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # token 版本号：改密码 / 改角色 / 禁用账户时递增，
+    # 使该用户此前签发的 JWT 立即失效（JWT 本身无法撤销）
+    token_version: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now

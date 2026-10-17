@@ -126,8 +126,20 @@ async def update_user(
         if payload.status is not None and payload.status != "active":
             raise HTTPException(status_code=400, detail="不能禁用自己的账户")
 
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    # 过滤掉显式为 null 的字段：status/role 是 NOT NULL 列，直接 setattr(None)
+    # 会触发 IntegrityError；同时也会绕过上面针对自己的降级/禁用保护。
+    changes = {
+        k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None
+    }
+    if not changes:
+        raise HTTPException(status_code=400, detail="没有需要修改的字段")
+
+    for field, value in changes.items():
         setattr(user, field, value)
+
+    # 角色或状态变更时递增 token 版本，使该用户手里的旧 token 立即按新权限失效
+    if {"role", "status"} & changes.keys():
+        user.token_version = (user.token_version or 0) + 1
 
     await db.commit()
     await db.refresh(user)
@@ -138,7 +150,7 @@ async def update_user(
         user_id=admin.id,
         username=admin.username,
         resource=user.username,
-        detail=payload.model_dump(exclude_unset=True),
+        detail=changes,
         ip=client_ip(request),
     )
     return UserOut.model_validate(user)
@@ -157,6 +169,9 @@ async def reset_password(
         raise HTTPException(status_code=404, detail="用户不存在")
 
     user.password_hash = hash_password(payload.new_password)
+    # 递增 token 版本：重置密码的常见场景就是账号被盗，
+    # 必须让攻击者手里的旧 token 立刻失效，而不只是等它自然过期
+    user.token_version = (user.token_version or 0) + 1
     await db.commit()
 
     await write_audit(

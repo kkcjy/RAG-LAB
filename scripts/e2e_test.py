@@ -7,7 +7,7 @@
 
 用法:
     python3 scripts/e2e_test.py
-    python3 scripts/e2e_test.py --host http://localhost:8000 -u admin -p xxx
+    python3 scripts/e2e_test.py --host http://localhost:18000 -u admin -p xxx
     python3 scripts/e2e_test.py --keep     # 保留测试数据，便于人工检查
 
 依赖：仅标准库
@@ -130,7 +130,7 @@ def wait_indexed(c: Client, kb_id: str, expect: int, timeout: int = 600) -> dict
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="RAG-LAB 端到端测试")
-    ap.add_argument("--host", default="http://localhost:8000")
+    ap.add_argument("--host", default="http://localhost:18000")
     ap.add_argument("-u", "--user", default="admin")
     ap.add_argument("-p", "--password", default="admin123456")
     ap.add_argument("--keep", action="store_true", help="保留测试数据")
@@ -250,7 +250,7 @@ def main() -> int:
             ("年假有多少天", "员工手册.md"),
             ("报销流程是什么", "员工手册.md"),
             ("向量检索的原理是什么", "系统说明.txt"),
-            ("技术指标里的向量维度是多少", "白皮书.pdf"),
+            ("DSR 协议解决什么问题", "DSR_protocol.pdf"),
             ("供应商评级标准", "供应商管理办法.docx"),
         ]
         hits = 0

@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from app.core.config import settings
+from app.core.errors import WebSearchError
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +62,8 @@ class TavilyWebSearch(BaseWebSearch):
                 resp.raise_for_status()
                 data = resp.json()
         except Exception as e:  # noqa: BLE001
-            logger.error("Tavily 搜索失败: %s", e)
-            return []
+            # 不返回空列表：调用方需要能区分「搜不到结果」与「搜索服务不可用」
+            raise WebSearchError(f"联网搜索失败：{e}") from e
 
         results = []
         for item in data.get("results", []):

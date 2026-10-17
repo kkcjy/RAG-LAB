@@ -166,19 +166,23 @@ async def delete_kb(
     collection = kb.collection_name
     kb_id = kb.id
 
-    # 删磁盘文件 + 上传目录
+    # 先取路径快照：提交后 ORM 对象会过期，不能再访问其属性
     docs = (
         await db.execute(select(Document).where(Document.kb_id == kb_id))
     ).scalars().all()
-    for d in docs:
-        try:
-            Path(d.stored_path).unlink(missing_ok=True)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("删除文件失败 %s: %s", d.stored_path, e)
-    remove_kb_dir(kb_id)
+    stored_paths = [d.stored_path for d in docs]
 
+    # 先提交库删除，再清理磁盘。反过来做的话，一旦提交失败就会留下
+    # "库记录还在、文件已被删光" 的不可恢复状态。
     await db.delete(kb)
     await db.commit()
+
+    for path in stored_paths:
+        try:
+            Path(path).unlink(missing_ok=True)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("删除文件失败 %s: %s", path, e)
+    remove_kb_dir(kb_id)
 
     # 删向量集合（放在事务提交之后：库记录已删，集合删除失败也不会留下不一致）
     try:
@@ -379,9 +383,9 @@ async def upload_document(
             detail=f"不支持的文件类型 {ext}，允许：{', '.join(settings.allowed_extension_list)}",
         )
 
-    # 读取并校验大小
-    content = await file.read()
+    # 读取并校验大小：按上限有界读取，避免超大文件先被整个读进内存再拒绝
     max_bytes = settings.max_upload_size_mb * 1024 * 1024
+    content = await file.read(max_bytes + 1)
     if len(content) > max_bytes:
         raise HTTPException(
             status_code=400, detail=f"文件超过 {settings.max_upload_size_mb}MB 限制"
