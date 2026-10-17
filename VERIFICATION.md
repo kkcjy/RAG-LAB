@@ -342,7 +342,7 @@ C级 | 75分以下 | 限制采购，限期整改
 ## 五、如何复现验证
 
 ```bash
-cd /home/kkcjy/LLM/RAG-LAB
+cd RAG-LAB
 
 # 轻量检查（秒级，零依赖）
 python3 scripts/selfcheck.py      # 静态结构，5 项检查
