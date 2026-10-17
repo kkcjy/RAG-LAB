@@ -137,7 +137,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title=settings.app_name,
-    description="企业级 RAG 知识库问答系统",
+    description="RAG 知识库问答系统",
     version="0.1.0",
     lifespan=lifespan,
     docs_url="/docs",
